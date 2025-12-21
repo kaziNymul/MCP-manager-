@@ -1,0 +1,81 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: mcp-manager
+
+resources:
+  - ../../base
+
+commonLabels:
+  environment: production
+
+# Production-specific patches
+patches:
+  # Increase replicas for production
+  - patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 5
+    target:
+      kind: Deployment
+      name: gateway
+  - patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 3
+    target:
+      kind: Deployment
+      name: control-plane
+  - patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 3
+    target:
+      kind: Deployment
+      name: scanner
+  - patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 3
+    target:
+      kind: Deployment
+      name: registry
+  - patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 3
+    target:
+      kind: Deployment
+      name: admin-ui
+
+# Production images (with specific tags, not :latest)
+images:
+  - name: your-registry.com/mcp-manager/gateway
+    newTag: v1.0.0
+  - name: your-registry.com/mcp-manager/control-plane
+    newTag: v1.0.0
+  - name: your-registry.com/mcp-manager/scanner
+    newTag: v1.0.0
+  - name: your-registry.com/mcp-manager/registry
+    newTag: v1.0.0
+  - name: your-registry.com/mcp-manager/admin-ui
+    newTag: v1.0.0
+
+# Production config overrides
+configMapGenerator:
+  - name: mcp-manager-config
+    behavior: merge
+    literals:
+      - LOG_LEVEL=info
+      - THREAT_DETECTION_SENSITIVITY=HIGH
+      - RATE_LIMIT_REQUESTS_PER_MINUTE=50
+
+# External secrets for production (using External Secrets Operator)
+# Uncomment and configure based on your secrets manager
+# secretGenerator:
+#   - name: mcp-manager-secrets
+#     behavior: replace
+#     type: Opaque
+#     options:
+#       annotations:
+#         externalsecrets.io/managed: "true"

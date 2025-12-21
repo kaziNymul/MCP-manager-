@@ -1,0 +1,21 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: mcp-manager
+
+resources:
+  - namespace.yaml
+  - configmap.yaml
+  - secrets.yaml
+  - rbac.yaml
+  - network-policies.yaml
+  - control-plane/deployment.yaml
+  - gateway/deployment.yaml
+  - registry/deployment.yaml
+  - scanner/deployment.yaml
+  - admin-ui/deployment.yaml
+  - ingress.yaml
+
+commonLabels:
+  app.kubernetes.io/part-of: mcp-manager
+  app.kubernetes.io/managed-by: kustomize

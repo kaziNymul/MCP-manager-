@@ -1,0 +1,34 @@
+{
+  "name": "mcp-manager",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Enterprise MCP governance, security scanning, and runtime enforcement",
+  "author": "MCP Manager Team",
+  "license": "UNLICENSED",
+  "engines": {
+    "node": ">=20.0.0",
+    "pnpm": ">=8.0.0"
+  },
+  "packageManager": "pnpm@9.0.0",
+  "scripts": {
+    "dev": "pnpm -r --parallel dev",
+    "dev:services": "pnpm --filter @mcp-manager/control-plane --filter @mcp-manager/registry --filter @mcp-manager/gateway --filter @mcp-manager/scanner --parallel dev",
+    "dev:ui": "pnpm --filter @mcp-manager/admin-ui dev",
+    "build": "pnpm -r build",
+    "lint": "pnpm -r lint",
+    "typecheck": "pnpm -r typecheck",
+    "test": "pnpm -r test",
+    "db:generate": "pnpm --filter @mcp-manager/prisma generate",
+    "db:push": "pnpm --filter @mcp-manager/prisma db:push",
+    "db:migrate": "pnpm --filter @mcp-manager/prisma migrate:dev",
+    "db:seed": "pnpm --filter @mcp-manager/prisma db:seed",
+    "token:generate": "node scripts/generate-dev-token.js",
+    "test:server": "cd examples/test-server && pnpm dev",
+    "clean": "pnpm -r clean && rm -rf node_modules"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "typescript": "^5.3.0",
+    "prettier": "^3.1.0"
+  }
+}

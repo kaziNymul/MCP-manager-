@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mcp-manager
+  labels:
+    app.kubernetes.io/name: mcp-manager
+    app.kubernetes.io/part-of: mcp-manager
+    # Pod security standards
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted

@@ -1,0 +1,552 @@
+// This is your Prisma schema file for MCP Manager
+// Multi-tenant SaaS with full MCP governance support
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================================
+// MULTI-TENANCY: Organizations and Teams
+// ============================================================================
+
+model Organization {
+  id          String   @id @default(cuid())
+  name        String   @unique
+  displayName String
+  slug        String   @unique
+  
+  // Settings
+  settings    Json     @default("{}")
+  
+  // Billing
+  plan        PlanType @default(FREE)
+  
+  // Timestamps
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  
+  // Relations
+  teams       Team[]
+  users       User[]
+  servers     Server[]
+  policies    Policy[]
+  auditEvents AuditEvent[]
+  apiKeys     ApiKey[]
+  
+  @@index([slug])
+}
+
+enum PlanType {
+  FREE
+  TEAM
+  ENTERPRISE
+}
+
+model Team {
+  id          String   @id @default(cuid())
+  name        String
+  displayName String
+  description String?
+  
+  // Parent org (multi-tenancy)
+  orgId       String
+  org         Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  
+  // Environment (dev, staging, prod)
+  environment String   @default("development")
+  
+  // Settings
+  settings    Json     @default("{}")
+  
+  // Timestamps
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  
+  // Relations
+  members     TeamMember[]
+  policies    Policy[]
+  serverAccess TeamServerAccess[]
+  
+  @@unique([orgId, name])
+  @@index([orgId])
+}
+
+model User {
+  id            String   @id @default(cuid())
+  externalId    String?  @unique  // OIDC sub claim
+  email         String   @unique
+  name          String?
+  avatarUrl     String?
+  
+  // Parent org
+  orgId         String
+  org           Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  
+  // Role within org
+  role          OrgRole  @default(MEMBER)
+  
+  // Status
+  status        UserStatus @default(ACTIVE)
+  
+  // Timestamps
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  lastLoginAt   DateTime?
+  
+  // Relations
+  teamMemberships TeamMember[]
+  approvals       Approval[]
+  auditEvents     AuditEvent[]
+  
+  @@index([orgId])
+  @@index([externalId])
+}
+
+enum OrgRole {
+  OWNER
+  ADMIN
+  MEMBER
+  VIEWER
+}
+
+enum UserStatus {
+  ACTIVE
+  SUSPENDED
+  PENDING
+}
+
+model TeamMember {
+  id        String   @id @default(cuid())
+  
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  teamId    String
+  team      Team     @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  
+  role      TeamRole @default(MEMBER)
+  
+  createdAt DateTime @default(now())
+  
+  @@unique([userId, teamId])
+  @@index([teamId])
+}
+
+enum TeamRole {
+  LEAD
+  MEMBER
+  VIEWER
+}
+
+// ============================================================================
+// MCP SERVERS: Registration and Versions
+// ============================================================================
+
+model Server {
+  id           String   @id @default(cuid())
+  
+  // Canonical name (org/server-name format)
+  name         String
+  displayName  String
+  description  String?
+  
+  // Parent org (multi-tenancy)
+  orgId        String
+  org          Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  
+  // Endpoint (where the actual MCP server lives)
+  endpoint     String
+  
+  // Transport type
+  transport    TransportType @default(HTTP_SSE)
+  
+  // Status
+  status       ServerStatus @default(PENDING)
+  
+  // Whether this server is publicly visible in registry
+  isPublic     Boolean  @default(false)
+  
+  // Metadata
+  homepage     String?
+  repository   String?
+  maintainer   String?
+  tags         String[] @default([])
+  
+  // Timestamps
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  
+  // Relations
+  versions     ServerVersion[]
+  teamAccess   TeamServerAccess[]
+  
+  @@unique([orgId, name])
+  @@index([orgId])
+  @@index([status])
+}
+
+enum TransportType {
+  HTTP_SSE
+  HTTP_STREAMABLE
+  STDIO
+}
+
+enum ServerStatus {
+  PENDING
+  ACTIVE
+  SUSPENDED
+  DEPRECATED
+}
+
+model ServerVersion {
+  id            String   @id @default(cuid())
+  
+  // Parent server
+  serverId      String
+  server        Server   @relation(fields: [serverId], references: [id], onDelete: Cascade)
+  
+  // Semantic version
+  version       String
+  
+  // Endpoint override (optional, defaults to server endpoint)
+  endpoint      String?
+  
+  // Approval status
+  status        VersionStatus @default(PENDING_SCAN)
+  
+  // Risk assessment
+  riskScore     Int?     // 0-100, lower is better
+  riskLevel     RiskLevel?
+  
+  // Evidence from scanning
+  evidenceBundle Json?
+  
+  // Tool schemas discovered during scan
+  toolSchemas   ToolSchema[]
+  
+  // Attestation
+  attestation   Json?    // Signing info, SBOM reference, etc.
+  checksum      String?  // SHA256 of server bundle if applicable
+  
+  // Timestamps
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  scannedAt     DateTime?
+  approvedAt    DateTime?
+  revokedAt     DateTime?
+  
+  // Relations
+  approvals     Approval[]
+  scanJobs      ScanJob[]
+  
+  @@unique([serverId, version])
+  @@index([serverId])
+  @@index([status])
+}
+
+enum VersionStatus {
+  PENDING_SCAN
+  SCANNING
+  SCAN_FAILED
+  PENDING_REVIEW
+  APPROVED
+  REJECTED
+  REVOKED
+}
+
+enum RiskLevel {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+model ToolSchema {
+  id            String   @id @default(cuid())
+  
+  // Parent version
+  versionId     String
+  version       ServerVersion @relation(fields: [versionId], references: [id], onDelete: Cascade)
+  
+  // Tool identity
+  name          String
+  displayName   String?
+  description   String?
+  
+  // JSON Schema for input
+  inputSchema   Json
+  
+  // Capability classification
+  capabilities  String[] @default([])  // read, write, delete, network, exec, etc.
+  
+  // Risk flags from static analysis
+  riskFlags     String[] @default([])
+  
+  // Whether this tool is dangerous by default
+  isDangerous   Boolean  @default(false)
+  
+  // Timestamps
+  createdAt     DateTime @default(now())
+  
+  @@unique([versionId, name])
+  @@index([versionId])
+}
+
+model TeamServerAccess {
+  id        String   @id @default(cuid())
+  
+  teamId    String
+  team      Team     @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  
+  serverId  String
+  server    Server   @relation(fields: [serverId], references: [id], onDelete: Cascade)
+  
+  // Access level
+  accessLevel AccessLevel @default(USE)
+  
+  // Allowed tools (empty = all approved tools)
+  allowedTools String[] @default([])
+  
+  // Denied tools (takes precedence)
+  deniedTools  String[] @default([])
+  
+  createdAt DateTime @default(now())
+  
+  @@unique([teamId, serverId])
+  @@index([teamId])
+  @@index([serverId])
+}
+
+enum AccessLevel {
+  USE
+  MANAGE
+}
+
+// ============================================================================
+// APPROVAL WORKFLOW
+// ============================================================================
+
+model Approval {
+  id          String   @id @default(cuid())
+  
+  // What's being approved
+  versionId   String
+  version     ServerVersion @relation(fields: [versionId], references: [id], onDelete: Cascade)
+  
+  // Who approved/rejected
+  userId      String?
+  user        User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  
+  // Decision
+  decision    ApprovalDecision
+  
+  // Notes
+  notes       String?
+  
+  // Auto-approved by scanner?
+  isAutomatic Boolean  @default(false)
+  
+  // Timestamps
+  createdAt   DateTime @default(now())
+  
+  @@index([versionId])
+}
+
+enum ApprovalDecision {
+  APPROVED
+  REJECTED
+  REVOKED
+}
+
+// ============================================================================
+// SCANNING PIPELINE
+// ============================================================================
+
+model ScanJob {
+  id          String   @id @default(cuid())
+  
+  // What's being scanned
+  versionId   String
+  version     ServerVersion @relation(fields: [versionId], references: [id], onDelete: Cascade)
+  
+  // Job status
+  status      ScanJobStatus @default(PENDING)
+  
+  // Results
+  results     Json?
+  error       String?
+  
+  // Timing
+  startedAt   DateTime?
+  completedAt DateTime?
+  
+  // Timestamps
+  createdAt   DateTime @default(now())
+  
+  @@index([versionId])
+  @@index([status])
+}
+
+enum ScanJobStatus {
+  PENDING
+  RUNNING
+  COMPLETED
+  FAILED
+}
+
+// ============================================================================
+// POLICIES: Runtime Enforcement Rules
+// ============================================================================
+
+model Policy {
+  id          String   @id @default(cuid())
+  
+  // Name and description
+  name        String
+  description String?
+  
+  // Scope
+  orgId       String
+  org         Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  
+  teamId      String?
+  team        Team?    @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  
+  // Priority (higher = evaluated first)
+  priority    Int      @default(0)
+  
+  // Policy type
+  type        PolicyType
+  
+  // Policy rules (JSON structure depends on type)
+  rules       Json
+  
+  // Status
+  isEnabled   Boolean  @default(true)
+  
+  // Timestamps
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  
+  @@index([orgId])
+  @@index([teamId])
+}
+
+enum PolicyType {
+  TOOL_ALLOWLIST      // Which tools are allowed
+  TOOL_DENYLIST       // Which tools are blocked
+  RATE_LIMIT          // Rate limiting rules
+  ARGUMENT_FILTER     // Argument validation/filtering
+  CAPABILITY_GATE     // Require approval for certain capabilities
+  ANOMALY_DETECTION   // Anomaly detection rules
+}
+
+// ============================================================================
+// AUDIT LOGGING
+// ============================================================================
+
+model AuditEvent {
+  id            String   @id @default(cuid())
+  
+  // Organization scope
+  orgId         String
+  org           Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  
+  // Actor
+  userId        String?
+  user          User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  actorType     ActorType @default(USER)
+  actorId       String?  // Service account ID if not user
+  
+  // Event details
+  eventType     String   // e.g., "tools.call", "server.approve", "policy.create"
+  action        String   // e.g., "invoke", "create", "update", "delete"
+  
+  // Target resource
+  resourceType  String?  // e.g., "server", "tool", "policy"
+  resourceId    String?
+  resourceName  String?
+  
+  // Request details
+  correlationId String?  // For tracing across services
+  requestId     String?
+  
+  // MCP-specific fields
+  toolName      String?
+  serverName    String?
+  arguments     Json?    // Sanitized/redacted
+  
+  // Result
+  status        AuditStatus @default(SUCCESS)
+  errorMessage  String?
+  
+  // Metadata
+  metadata      Json?
+  ipAddress     String?
+  userAgent     String?
+  
+  // Timing
+  durationMs    Int?
+  
+  // Timestamps
+  createdAt     DateTime @default(now())
+  
+  @@index([orgId])
+  @@index([userId])
+  @@index([eventType])
+  @@index([createdAt])
+  @@index([correlationId])
+}
+
+enum ActorType {
+  USER
+  SERVICE
+  SYSTEM
+}
+
+enum AuditStatus {
+  SUCCESS
+  FAILURE
+  BLOCKED
+}
+
+// ============================================================================
+// API KEYS: For programmatic access
+// ============================================================================
+
+model ApiKey {
+  id          String   @id @default(cuid())
+  
+  // Key identity
+  name        String
+  keyHash     String   @unique  // SHA256 of the actual key
+  keyPrefix   String   // First 8 chars for identification
+  
+  // Organization scope
+  orgId       String
+  org         Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  
+  // Permissions
+  scopes      String[] @default([])
+  
+  // Status
+  isActive    Boolean  @default(true)
+  
+  // Expiration
+  expiresAt   DateTime?
+  
+  // Usage tracking
+  lastUsedAt  DateTime?
+  usageCount  Int      @default(0)
+  
+  // Timestamps
+  createdAt   DateTime @default(now())
+  
+  @@index([orgId])
+  @@index([keyHash])
+}

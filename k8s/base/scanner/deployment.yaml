@@ -1,0 +1,108 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: scanner
+  namespace: mcp-manager
+  labels:
+    app: scanner
+    app.kubernetes.io/name: scanner
+    app.kubernetes.io/component: worker
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: scanner
+  template:
+    metadata:
+      labels:
+        app: scanner
+    spec:
+      serviceAccountName: mcp-manager
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        runAsGroup: 1001
+        fsGroup: 1001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: scanner
+          image: your-registry.com/mcp-manager/scanner:latest
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 3004
+              protocol: TCP
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            requests:
+              cpu: "1000m"
+              memory: "1Gi"
+            limits:
+              cpu: "4000m"
+              memory: "4Gi"
+          env:
+            - name: NODE_ENV
+              valueFrom:
+                configMapKeyRef:
+                  name: mcp-manager-config
+                  key: NODE_ENV
+            - name: PORT
+              value: "3004"
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: mcp-manager-secrets
+                  key: DATABASE_URL
+            - name: SCAN_CONCURRENCY
+              valueFrom:
+                configMapKeyRef:
+                  name: mcp-manager-config
+                  key: SCAN_CONCURRENCY
+            - name: SCAN_TIMEOUT_MS
+              valueFrom:
+                configMapKeyRef:
+                  name: mcp-manager-config
+                  key: SCAN_TIMEOUT_MS
+            - name: SCAN_INTERVAL_MS
+              valueFrom:
+                configMapKeyRef:
+                  name: mcp-manager-config
+                  key: SCAN_INTERVAL_MS
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: scanner
+  namespace: mcp-manager
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: 3004
+      targetPort: http
+  selector:
+    app: scanner

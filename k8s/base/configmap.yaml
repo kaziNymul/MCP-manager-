@@ -1,0 +1,41 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mcp-manager-config
+  namespace: mcp-manager
+data:
+  # Environment
+  NODE_ENV: "production"
+  LOG_LEVEL: "info"
+  LOG_FORMAT: "json"
+  
+  # Service Ports
+  CONTROL_PLANE_PORT: "3001"
+  REGISTRY_PORT: "3002"
+  GATEWAY_PORT: "3003"
+  SCANNER_PORT: "3004"
+  
+  # Scanner Configuration
+  SCAN_INTERVAL_MS: "60000"
+  SCAN_CONCURRENCY: "5"
+  SCAN_TIMEOUT_MS: "60000"
+  
+  # Gateway Configuration
+  GATEWAY_TIMEOUT_MS: "30000"
+  MAX_REQUEST_SIZE_KB: "1024"
+  
+  # Rate Limiting
+  RATE_LIMIT_REQUESTS_PER_MINUTE: "100"
+  RATE_LIMIT_WINDOW_MS: "60000"
+  
+  # Security Settings
+  THREAT_DETECTION_SENSITIVITY: "MEDIUM"
+  BLOCK_ON_HIGH_THREAT: "true"
+  
+  # OIDC Configuration (values from secrets)
+  OIDC_AUDIENCE: "mcp-manager"
+  
+  # Internal Service URLs
+  REGISTRY_URL: "http://registry:3002"
+  GATEWAY_URL: "http://gateway:3003"
+  CONTROL_PLANE_URL: "http://control-plane:3001"
