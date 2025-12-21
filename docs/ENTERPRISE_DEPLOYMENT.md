@@ -11,12 +11,13 @@ Kubernetes, and high availability.
 2. [How Security Scanning Works](#how-security-scanning-works)
 3. [GitHub Enterprise Integration](#github-enterprise-integration)
 4. [Kubernetes Deployment](#kubernetes-deployment)
-5. [High Availability Architecture](#high-availability-architecture)
-6. [Multi-Tenant Configuration](#multi-tenant-configuration)
-7. [Security Hardening](#security-hardening)
-8. [Monitoring & Observability](#monitoring--observability)
-9. [Disaster Recovery](#disaster-recovery)
-10. [Troubleshooting](#troubleshooting)
+5. [MKE Deployment with Bitbucket CI/CD](#mke-mirantis-kubernetes-engine-deployment-with-bitbucket-cicd)
+6. [High Availability Architecture](#high-availability-architecture)
+7. [Multi-Tenant Configuration](#multi-tenant-configuration)
+8. [Security Hardening](#security-hardening)
+9. [Monitoring & Observability](#monitoring--observability)
+10. [Disaster Recovery](#disaster-recovery)
+11. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -528,7 +529,776 @@ Point these domains to your ingress:
 
 ---
 
-## High Availability Architecture
+## MKE (Mirantis Kubernetes Engine) Deployment with Bitbucket CI/CD
+
+This section provides a complete guide for deploying MCP Manager to **Mirantis Kubernetes Engine (MKE)** 
+with automated CI/CD using **Bitbucket Pipelines**.
+
+### Architecture Overview
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                              CI/CD PIPELINE                                      │
+├─────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                  │
+│   ┌──────────────┐      ┌──────────────┐      ┌──────────────┐                  │
+│   │  Developer   │      │  Bitbucket   │      │  Container   │                  │
+│   │  Push Code   │─────▶│  Pipelines   │─────▶│  Registry    │                  │
+│   └──────────────┘      └──────────────┘      └──────────────┘                  │
+│                                │                      │                          │
+│                                ▼                      ▼                          │
+│                         ┌──────────────┐      ┌──────────────┐                  │
+│                         │   Build &    │      │  Docker Hub  │                  │
+│                         │   Test       │      │  or Private  │                  │
+│                         └──────────────┘      └──────────────┘                  │
+│                                │                      │                          │
+│                                └──────────┬───────────┘                          │
+│                                           ▼                                      │
+│                                  ┌──────────────────┐                            │
+│                                  │   MKE Cluster    │                            │
+│                                  │   (kubectl apply)│                            │
+│                                  └──────────────────┘                            │
+│                                                                                  │
+└─────────────────────────────────────────────────────────────────────────────────┘
+
+                                           │
+                                           ▼
+
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                           MKE CLUSTER                                            │
+├─────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                  │
+│   ┌─────────────────────────────────────────────────────────────────────────┐   │
+│   │                         NAMESPACE: mcp-manager                           │   │
+│   │                                                                          │   │
+│   │  ┌────────────┐  ┌────────────┐  ┌────────────┐  ┌────────────┐        │   │
+│   │  │  Admin UI  │  │  Gateway   │  │  Control   │  │  Registry  │        │   │
+│   │  │  (3 pods)  │  │  (5 pods)  │  │   Plane    │  │  (2 pods)  │        │   │
+│   │  │    :3000   │  │    :3003   │  │  (3 pods)  │  │    :3002   │        │   │
+│   │  └────────────┘  └────────────┘  │    :3001   │  └────────────┘        │   │
+│   │                                   └────────────┘                         │   │
+│   │                                         │                                │   │
+│   │  ┌────────────────────────────────────────────────────────────────┐     │   │
+│   │  │                      SCANNER WORKERS                           │     │   │
+│   │  │  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐       │     │   │
+│   │  │  │Scanner 1 │  │Scanner 2 │  │Scanner 3 │  │Scanner N │       │     │   │
+│   │  │  └──────────┘  └──────────┘  └──────────┘  └──────────┘       │     │   │
+│   │  └────────────────────────────────────────────────────────────────┘     │   │
+│   │                                         │                                │   │
+│   │                                         ▼                                │   │
+│   │                              ┌──────────────────┐                       │   │
+│   │                              │   PostgreSQL     │                       │   │
+│   │                              │  (StatefulSet)   │                       │   │
+│   │                              └──────────────────┘                       │   │
+│   │                                                                          │   │
+│   └─────────────────────────────────────────────────────────────────────────┘   │
+│                                                                                  │
+└─────────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Prerequisites
+
+1. **MKE Cluster** (v3.6+) with kubectl access
+2. **Bitbucket Repository** with the MCP Manager source code
+3. **Container Registry** (Docker Hub, AWS ECR, or MKE's built-in registry)
+4. **PostgreSQL Database** (managed or in-cluster)
+
+### Step 1: Configure Bitbucket Repository
+
+#### 1.1 Repository Structure
+
+Ensure your Bitbucket repository has this structure:
+
+```
+mcp-manager/
+├── apps/
+│   ├── admin-ui/
+│   ├── control-plane/
+│   ├── gateway/
+│   ├── registry/
+│   └── scanner/
+├── packages/
+│   ├── prisma/
+│   └── shared/
+├── k8s/
+│   ├── base/
+│   └── overlays/
+│       ├── development/
+│       ├── staging/
+│       └── production/
+├── bitbucket-pipelines.yml      ← CI/CD Pipeline
+├── docker-compose.yml
+├── package.json
+└── pnpm-workspace.yaml
+```
+
+#### 1.2 Create bitbucket-pipelines.yml
+
+Create `bitbucket-pipelines.yml` in your repository root:
+
+```yaml
+# bitbucket-pipelines.yml
+image: node:20
+
+definitions:
+  services:
+    docker:
+      memory: 3072
+  
+  caches:
+    pnpm: ~/.local/share/pnpm/store
+  
+  steps:
+    - step: &install-dependencies
+        name: Install Dependencies
+        caches:
+          - pnpm
+        script:
+          - npm install -g pnpm@9
+          - pnpm install --frozen-lockfile
+        artifacts:
+          - node_modules/**
+          - apps/**/node_modules/**
+          - packages/**/node_modules/**
+    
+    - step: &lint-and-test
+        name: Lint & Test
+        caches:
+          - pnpm
+        script:
+          - npm install -g pnpm@9
+          - pnpm lint
+          - pnpm test
+    
+    - step: &build-images
+        name: Build Docker Images
+        services:
+          - docker
+        caches:
+          - docker
+        script:
+          - export IMAGE_TAG="${BITBUCKET_COMMIT:0:7}"
+          
+          # Login to container registry
+          - echo "$DOCKER_PASSWORD" | docker login -u "$DOCKER_USERNAME" --password-stdin $DOCKER_REGISTRY
+          
+          # Build all service images
+          - docker build -t $DOCKER_REGISTRY/mcp-manager/admin-ui:$IMAGE_TAG -f apps/admin-ui/Dockerfile .
+          - docker build -t $DOCKER_REGISTRY/mcp-manager/control-plane:$IMAGE_TAG -f apps/control-plane/Dockerfile .
+          - docker build -t $DOCKER_REGISTRY/mcp-manager/gateway:$IMAGE_TAG -f apps/gateway/Dockerfile .
+          - docker build -t $DOCKER_REGISTRY/mcp-manager/registry:$IMAGE_TAG -f apps/registry/Dockerfile .
+          - docker build -t $DOCKER_REGISTRY/mcp-manager/scanner:$IMAGE_TAG -f apps/scanner/Dockerfile .
+          
+          # Push images
+          - docker push $DOCKER_REGISTRY/mcp-manager/admin-ui:$IMAGE_TAG
+          - docker push $DOCKER_REGISTRY/mcp-manager/control-plane:$IMAGE_TAG
+          - docker push $DOCKER_REGISTRY/mcp-manager/gateway:$IMAGE_TAG
+          - docker push $DOCKER_REGISTRY/mcp-manager/registry:$IMAGE_TAG
+          - docker push $DOCKER_REGISTRY/mcp-manager/scanner:$IMAGE_TAG
+          
+          # Also tag as latest for dev branch
+          - |
+            if [ "$BITBUCKET_BRANCH" = "dev" ]; then
+              docker tag $DOCKER_REGISTRY/mcp-manager/admin-ui:$IMAGE_TAG $DOCKER_REGISTRY/mcp-manager/admin-ui:dev
+              docker tag $DOCKER_REGISTRY/mcp-manager/control-plane:$IMAGE_TAG $DOCKER_REGISTRY/mcp-manager/control-plane:dev
+              docker tag $DOCKER_REGISTRY/mcp-manager/gateway:$IMAGE_TAG $DOCKER_REGISTRY/mcp-manager/gateway:dev
+              docker tag $DOCKER_REGISTRY/mcp-manager/registry:$IMAGE_TAG $DOCKER_REGISTRY/mcp-manager/registry:dev
+              docker tag $DOCKER_REGISTRY/mcp-manager/scanner:$IMAGE_TAG $DOCKER_REGISTRY/mcp-manager/scanner:dev
+              docker push $DOCKER_REGISTRY/mcp-manager/admin-ui:dev
+              docker push $DOCKER_REGISTRY/mcp-manager/control-plane:dev
+              docker push $DOCKER_REGISTRY/mcp-manager/gateway:dev
+              docker push $DOCKER_REGISTRY/mcp-manager/registry:dev
+              docker push $DOCKER_REGISTRY/mcp-manager/scanner:dev
+            fi
+    
+    - step: &deploy-to-mke
+        name: Deploy to MKE
+        deployment: production
+        script:
+          - export IMAGE_TAG="${BITBUCKET_COMMIT:0:7}"
+          
+          # Install kubectl
+          - curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+          - chmod +x kubectl && mv kubectl /usr/local/bin/
+          
+          # Configure kubectl for MKE
+          - mkdir -p ~/.kube
+          - echo "$MKE_KUBECONFIG" | base64 -d > ~/.kube/config
+          - chmod 600 ~/.kube/config
+          
+          # Verify cluster connection
+          - kubectl cluster-info
+          - kubectl get nodes
+          
+          # Update image tags in kustomization
+          - |
+            cat > k8s/overlays/production/kustomization.yaml << EOF
+            apiVersion: kustomize.config.k8s.io/v1beta1
+            kind: Kustomization
+            
+            namespace: mcp-manager
+            
+            resources:
+              - ../../base
+            
+            images:
+              - name: mcp-manager/admin-ui
+                newName: $DOCKER_REGISTRY/mcp-manager/admin-ui
+                newTag: "$IMAGE_TAG"
+              - name: mcp-manager/control-plane
+                newName: $DOCKER_REGISTRY/mcp-manager/control-plane
+                newTag: "$IMAGE_TAG"
+              - name: mcp-manager/gateway
+                newName: $DOCKER_REGISTRY/mcp-manager/gateway
+                newTag: "$IMAGE_TAG"
+              - name: mcp-manager/registry
+                newName: $DOCKER_REGISTRY/mcp-manager/registry
+                newTag: "$IMAGE_TAG"
+              - name: mcp-manager/scanner
+                newName: $DOCKER_REGISTRY/mcp-manager/scanner
+                newTag: "$IMAGE_TAG"
+            
+            replicas:
+              - name: gateway
+                count: 5
+              - name: control-plane
+                count: 3
+              - name: admin-ui
+                count: 3
+              - name: registry
+                count: 2
+              - name: scanner
+                count: 3
+            EOF
+          
+          # Apply to cluster
+          - kubectl apply -k k8s/overlays/production
+          
+          # Wait for rollout
+          - kubectl rollout status deployment/gateway -n mcp-manager --timeout=300s
+          - kubectl rollout status deployment/control-plane -n mcp-manager --timeout=300s
+          - kubectl rollout status deployment/admin-ui -n mcp-manager --timeout=300s
+          - kubectl rollout status deployment/registry -n mcp-manager --timeout=300s
+          - kubectl rollout status deployment/scanner -n mcp-manager --timeout=300s
+          
+          # Run database migrations
+          - kubectl exec deploy/control-plane -n mcp-manager -- npx prisma migrate deploy
+          
+          # Verify deployment
+          - kubectl get pods -n mcp-manager
+          - echo "Deployment complete! Image tag: $IMAGE_TAG"
+
+pipelines:
+  branches:
+    dev:
+      - step: *install-dependencies
+      - step: *lint-and-test
+      - step: *build-images
+      - step:
+          <<: *deploy-to-mke
+          deployment: staging
+          name: Deploy to MKE (Staging)
+    
+    main:
+      - step: *install-dependencies
+      - step: *lint-and-test
+      - step: *build-images
+      - step:
+          <<: *deploy-to-mke
+          deployment: production
+          name: Deploy to MKE (Production)
+          trigger: manual  # Require manual approval for production
+  
+  pull-requests:
+    '**':
+      - step: *install-dependencies
+      - step: *lint-and-test
+  
+  tags:
+    'v*':
+      - step: *install-dependencies
+      - step: *lint-and-test
+      - step:
+          <<: *build-images
+          name: Build Release Images
+          script:
+            - export IMAGE_TAG="${BITBUCKET_TAG}"
+            
+            # Login and build with version tag
+            - echo "$DOCKER_PASSWORD" | docker login -u "$DOCKER_USERNAME" --password-stdin $DOCKER_REGISTRY
+            
+            - docker build -t $DOCKER_REGISTRY/mcp-manager/admin-ui:$IMAGE_TAG -f apps/admin-ui/Dockerfile .
+            - docker build -t $DOCKER_REGISTRY/mcp-manager/control-plane:$IMAGE_TAG -f apps/control-plane/Dockerfile .
+            - docker build -t $DOCKER_REGISTRY/mcp-manager/gateway:$IMAGE_TAG -f apps/gateway/Dockerfile .
+            - docker build -t $DOCKER_REGISTRY/mcp-manager/registry:$IMAGE_TAG -f apps/registry/Dockerfile .
+            - docker build -t $DOCKER_REGISTRY/mcp-manager/scanner:$IMAGE_TAG -f apps/scanner/Dockerfile .
+            
+            # Tag as latest
+            - docker tag $DOCKER_REGISTRY/mcp-manager/admin-ui:$IMAGE_TAG $DOCKER_REGISTRY/mcp-manager/admin-ui:latest
+            - docker tag $DOCKER_REGISTRY/mcp-manager/control-plane:$IMAGE_TAG $DOCKER_REGISTRY/mcp-manager/control-plane:latest
+            - docker tag $DOCKER_REGISTRY/mcp-manager/gateway:$IMAGE_TAG $DOCKER_REGISTRY/mcp-manager/gateway:latest
+            - docker tag $DOCKER_REGISTRY/mcp-manager/registry:$IMAGE_TAG $DOCKER_REGISTRY/mcp-manager/registry:latest
+            - docker tag $DOCKER_REGISTRY/mcp-manager/scanner:$IMAGE_TAG $DOCKER_REGISTRY/mcp-manager/scanner:latest
+            
+            # Push all tags
+            - docker push $DOCKER_REGISTRY/mcp-manager/admin-ui:$IMAGE_TAG
+            - docker push $DOCKER_REGISTRY/mcp-manager/admin-ui:latest
+            - docker push $DOCKER_REGISTRY/mcp-manager/control-plane:$IMAGE_TAG
+            - docker push $DOCKER_REGISTRY/mcp-manager/control-plane:latest
+            - docker push $DOCKER_REGISTRY/mcp-manager/gateway:$IMAGE_TAG
+            - docker push $DOCKER_REGISTRY/mcp-manager/gateway:latest
+            - docker push $DOCKER_REGISTRY/mcp-manager/registry:$IMAGE_TAG
+            - docker push $DOCKER_REGISTRY/mcp-manager/registry:latest
+            - docker push $DOCKER_REGISTRY/mcp-manager/scanner:$IMAGE_TAG
+            - docker push $DOCKER_REGISTRY/mcp-manager/scanner:latest
+      - step:
+          <<: *deploy-to-mke
+          deployment: production
+          trigger: manual
+```
+
+### Step 2: Configure Bitbucket Repository Variables
+
+Go to **Repository Settings → Pipelines → Repository Variables** and add:
+
+| Variable | Description | Secured |
+|----------|-------------|---------|
+| `DOCKER_REGISTRY` | Container registry URL (e.g., `docker.io`, `your-registry.company.com`) | No |
+| `DOCKER_USERNAME` | Registry username | No |
+| `DOCKER_PASSWORD` | Registry password or token | **Yes** |
+| `MKE_KUBECONFIG` | Base64-encoded kubeconfig for MKE | **Yes** |
+
+#### Generating MKE_KUBECONFIG
+
+```bash
+# 1. Get kubeconfig from MKE
+#    Option A: Download from MKE Web UI
+#    Go to: MKE Dashboard → Admin Settings → Download Client Bundle
+
+#    Option B: Use docker/ucp CLI
+docker run --rm -it \
+  -e UCP_USER=admin \
+  -e UCP_PASSWORD=your-password \
+  mirantis/ucp:3.6.0 \
+  dump-certs --cluster --ca
+
+# 2. Base64 encode the kubeconfig
+cat ~/.kube/mke-config | base64 -w 0
+
+# 3. Copy the output and paste into Bitbucket as MKE_KUBECONFIG
+```
+
+### Step 3: Configure MKE Cluster
+
+#### 3.1 Create Namespace and Secrets
+
+First, manually create the namespace and secrets in MKE:
+
+```bash
+# Connect to MKE cluster
+export KUBECONFIG=~/.kube/mke-config
+
+# Create namespace
+kubectl create namespace mcp-manager
+
+# Create secrets
+kubectl create secret generic mcp-manager-secrets \
+  --namespace mcp-manager \
+  --from-literal=DATABASE_URL="postgresql://user:pass@postgres.mcp-manager:5432/mcp_manager" \
+  --from-literal=JWT_SECRET="your-super-secret-jwt-key-min-32-chars" \
+  --from-literal=GITHUB_SCOPE_LEVEL="enterprise" \
+  --from-literal=GITHUB_ENTERPRISE_NAME="your-enterprise" \
+  --from-literal=GITHUB_API_URL="https://github.your-company.com/api/v3" \
+  --from-literal=GITHUB_APP_ID="12345" \
+  --from-literal=GITHUB_APP_INSTALLATION_ID="67890" \
+  --from-file=GITHUB_PRIVATE_KEY=./github-app-private-key.pem
+
+# Create image pull secret (if using private registry)
+kubectl create secret docker-registry regcred \
+  --namespace mcp-manager \
+  --docker-server=your-registry.company.com \
+  --docker-username=your-username \
+  --docker-password=your-password
+```
+
+#### 3.2 PostgreSQL Setup
+
+**Option A: In-Cluster PostgreSQL (Development/Staging)**
+
+Create `k8s/base/postgresql/statefulset.yaml`:
+
+```yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-pvc
+  namespace: mcp-manager
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 50Gi
+  storageClassName: standard  # Use your MKE storage class
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  namespace: mcp-manager
+spec:
+  serviceName: postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          ports:
+            - containerPort: 5432
+          env:
+            - name: POSTGRES_DB
+              value: mcp_manager
+            - name: POSTGRES_USER
+              value: mcp_user
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-secret
+                  key: password
+          volumeMounts:
+            - name: postgres-data
+              mountPath: /var/lib/postgresql/data
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1Gi"
+            limits:
+              cpu: "2000m"
+              memory: "4Gi"
+      volumes:
+        - name: postgres-data
+          persistentVolumeClaim:
+            claimName: postgres-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: mcp-manager
+spec:
+  selector:
+    app: postgres
+  ports:
+    - port: 5432
+      targetPort: 5432
+  clusterIP: None
+```
+
+**Option B: External Managed PostgreSQL (Production)**
+
+Use AWS RDS, Azure Database for PostgreSQL, or Google Cloud SQL:
+
+```bash
+# Update secrets with external database URL
+kubectl create secret generic mcp-manager-secrets \
+  --namespace mcp-manager \
+  --from-literal=DATABASE_URL="postgresql://mcp_user:password@mcp-db.xxxxx.us-east-1.rds.amazonaws.com:5432/mcp_manager?sslmode=require" \
+  # ... other secrets
+```
+
+#### 3.3 MKE Ingress Configuration
+
+Create `k8s/overlays/production/ingress-mke.yaml`:
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: mcp-manager-ingress
+  namespace: mcp-manager
+  annotations:
+    # MKE uses Interlock for ingress by default
+    com.docker.ucp.mesh.http.8080: "external_route=http://mcp.your-company.com,internal_port=3000"
+    com.docker.ucp.mesh.http.8081: "external_route=http://mcp-gateway.your-company.com,internal_port=3003"
+    com.docker.ucp.mesh.http.8082: "external_route=http://mcp-registry.your-company.com,internal_port=3002"
+    # For nginx ingress controller
+    kubernetes.io/ingress.class: nginx
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/proxy-body-size: "50m"
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+spec:
+  tls:
+    - hosts:
+        - mcp.your-company.com
+        - mcp-gateway.your-company.com
+        - mcp-registry.your-company.com
+      secretName: mcp-tls-secret
+  rules:
+    - host: mcp.your-company.com
+      http:
+        paths:
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: control-plane
+                port:
+                  number: 3001
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: admin-ui
+                port:
+                  number: 3000
+    
+    - host: mcp-gateway.your-company.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: gateway
+                port:
+                  number: 3003
+    
+    - host: mcp-registry.your-company.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: registry
+                port:
+                  number: 3002
+```
+
+### Step 4: Deploy Pipeline Workflow
+
+#### 4.1 Development Workflow
+
+```
+┌──────────────┐     ┌──────────────┐     ┌──────────────┐     ┌──────────────┐
+│  Developer   │     │  Feature     │     │  Pull        │     │  Dev Branch  │
+│  Creates     │────▶│  Branch      │────▶│  Request     │────▶│  Merge       │
+│  Feature     │     │  Push        │     │  CI Tests    │     │              │
+└──────────────┘     └──────────────┘     └──────────────┘     └──────────────┘
+                                                                       │
+                                                                       ▼
+                                                               ┌──────────────┐
+                                                               │  Auto Deploy │
+                                                               │  to Staging  │
+                                                               └──────────────┘
+```
+
+#### 4.2 Production Workflow
+
+```
+┌──────────────┐     ┌──────────────┐     ┌──────────────┐     ┌──────────────┐
+│  Create      │     │  Build &     │     │  Manual      │     │  Deploy to   │
+│  Release Tag │────▶│  Push Images │────▶│  Approval    │────▶│  Production  │
+│  v1.2.0      │     │              │     │  Required    │     │              │
+└──────────────┘     └──────────────┘     └──────────────┘     └──────────────┘
+```
+
+### Step 5: Trigger First Deployment
+
+```bash
+# Clone repository
+git clone https://bitbucket.org/your-org/mcp-manager.git
+cd mcp-manager
+
+# Create and push to dev branch
+git checkout -b dev
+git push origin dev
+
+# This triggers the pipeline automatically
+# Monitor at: https://bitbucket.org/your-org/mcp-manager/addon/pipelines/home
+```
+
+### Step 6: Verify Deployment
+
+```bash
+# Connect to MKE cluster
+export KUBECONFIG=~/.kube/mke-config
+
+# Check pods
+kubectl get pods -n mcp-manager
+# Expected output:
+# NAME                             READY   STATUS    RESTARTS   AGE
+# admin-ui-xxx-xxx                 1/1     Running   0          5m
+# control-plane-xxx-xxx            1/1     Running   0          5m
+# gateway-xxx-xxx                  1/1     Running   0          5m
+# registry-xxx-xxx                 1/1     Running   0          5m
+# scanner-xxx-xxx                  1/1     Running   0          5m
+# postgres-0                       1/1     Running   0          10m
+
+# Check services
+kubectl get svc -n mcp-manager
+
+# Check ingress
+kubectl get ingress -n mcp-manager
+
+# View logs
+kubectl logs -f deployment/gateway -n mcp-manager
+
+# Run database migration manually (if not done by pipeline)
+kubectl exec -it deployment/control-plane -n mcp-manager -- npx prisma migrate deploy
+
+# Access Admin UI
+open https://mcp.your-company.com
+```
+
+### Troubleshooting MKE Deployment
+
+#### Common Issues
+
+**1. Pipeline fails to connect to MKE**
+
+```
+Error: Unable to connect to the server: x509: certificate signed by unknown authority
+```
+
+**Solution:** Ensure `MKE_KUBECONFIG` includes the CA certificate:
+
+```bash
+# Check your kubeconfig has the certificate-authority-data
+cat ~/.kube/mke-config | grep certificate-authority-data
+
+# Re-encode with all certs
+kubectl config view --raw | base64 -w 0
+```
+
+**2. Image pull failures**
+
+```
+Error: ImagePullBackOff
+```
+
+**Solution:** Create image pull secret:
+
+```bash
+kubectl create secret docker-registry regcred \
+  --namespace mcp-manager \
+  --docker-server=your-registry.company.com \
+  --docker-username=your-username \
+  --docker-password=your-password
+
+# Add to deployments
+kubectl patch deployment gateway -n mcp-manager \
+  -p '{"spec":{"template":{"spec":{"imagePullSecrets":[{"name":"regcred"}]}}}}'
+```
+
+**3. Database connection fails**
+
+```
+Error: Connection refused to postgres:5432
+```
+
+**Solution:** Check PostgreSQL is running and DNS resolves:
+
+```bash
+# Check postgres pod
+kubectl get pods -n mcp-manager -l app=postgres
+
+# Test DNS from another pod
+kubectl exec -it deployment/control-plane -n mcp-manager -- nslookup postgres
+
+# Check DATABASE_URL secret
+kubectl get secret mcp-manager-secrets -n mcp-manager -o jsonpath='{.data.DATABASE_URL}' | base64 -d
+```
+
+**4. Ingress not routing traffic**
+
+**Solution:** Check MKE's ingress controller:
+
+```bash
+# For Interlock (MKE default)
+kubectl get pods -n kube-system | grep interlock
+
+# For nginx ingress
+kubectl get pods -n ingress-nginx
+
+# Check ingress status
+kubectl describe ingress mcp-manager-ingress -n mcp-manager
+```
+
+### MKE-Specific Considerations
+
+#### Storage Classes
+
+MKE supports various storage backends. Check available storage classes:
+
+```bash
+kubectl get storageclass
+```
+
+Update PVC to use MKE storage:
+
+```yaml
+# For vSphere
+storageClassName: vsphere-sc
+
+# For AWS EBS
+storageClassName: gp3
+
+# For local storage
+storageClassName: local-path
+```
+
+#### Network Policies (MKE with Calico)
+
+MKE uses Calico for networking. The network policies in `k8s/base/network-policies.yaml` 
+should work out of the box.
+
+#### Resource Quotas
+
+Create resource quotas to limit namespace resources:
+
+```yaml
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: mcp-manager-quota
+  namespace: mcp-manager
+spec:
+  hard:
+    requests.cpu: "20"
+    requests.memory: 40Gi
+    limits.cpu: "40"
+    limits.memory: 80Gi
+    pods: "50"
+    persistentvolumeclaims: "10"
+```
+
+### Complete Deployment Checklist
+
+- [ ] 1. Push code to Bitbucket repository
+- [ ] 2. Create `bitbucket-pipelines.yml`
+- [ ] 3. Configure Bitbucket repository variables
+- [ ] 4. Generate MKE kubeconfig and base64 encode
+- [ ] 5. Create namespace in MKE: `kubectl create namespace mcp-manager`
+- [ ] 6. Create secrets in MKE (database, GitHub, JWT)
+- [ ] 7. Set up PostgreSQL (in-cluster or external)
+- [ ] 8. Configure ingress for MKE
+- [ ] 9. Push to dev branch to trigger pipeline
+- [ ] 10. Monitor pipeline in Bitbucket
+- [ ] 11. Verify pods are running
+- [ ] 12. Run database migrations
+- [ ] 13. Access Admin UI and verify functionality
+- [ ] 14. Configure DNS to point to MKE ingress
+- [ ] 15. Enable SSL/TLS certificates
+
+---
 
 ### Multi-Region Deployment
 

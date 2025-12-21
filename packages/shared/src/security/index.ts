@@ -2,6 +2,7 @@
  * Security module exports
  */
 
-export * from './threat-detector';
-export * from './anomaly-detector';
-export * from './vulnerability-scanner';
+export * from './threat-detector.js';
+export * from './anomaly-detector.js';
+export * from './vulnerability-scanner.js';
+export * from './source-code-scanner.js';

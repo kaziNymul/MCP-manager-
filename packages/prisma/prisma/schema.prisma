@@ -171,9 +171,23 @@ model Server {
   // Whether this server is publicly visible in registry
   isPublic     Boolean  @default(false)
   
+  // =========================================================================
+  // SOURCE CODE REPOSITORY (for code scanning)
+  // =========================================================================
+  // Repository URL (e.g., https://github.com/org/repo)
+  repositoryUrl       String?
+  // Branch to scan (default: main)
+  repositoryBranch    String?  @default("main")
+  // Repository provider (github, gitlab, bitbucket, azure-devops)
+  repositoryProvider  RepositoryProvider?
+  // Path within repo where MCP server code lives (default: root)
+  repositoryPath      String?  @default("/")
+  // Whether source code scanning is enabled
+  sourceCodeScanEnabled Boolean @default(false)
+  
   // Metadata
   homepage     String?
-  repository   String?
+  repository   String?  // Legacy field for display, repositoryUrl is for scanning
   maintainer   String?
   tags         String[] @default([])
   
@@ -194,6 +208,14 @@ enum TransportType {
   HTTP_SSE
   HTTP_STREAMABLE
   STDIO
+}
+
+enum RepositoryProvider {
+  GITHUB
+  GITLAB
+  BITBUCKET
+  AZURE_DEVOPS
+  CUSTOM
 }
 
 enum ServerStatus {
@@ -374,12 +396,29 @@ model ScanJob {
   versionId   String
   version     ServerVersion @relation(fields: [versionId], references: [id], onDelete: Cascade)
   
+  // Scan type
+  scanType    ScanType @default(API_INTROSPECTION)
+  
   // Job status
   status      ScanJobStatus @default(PENDING)
   
   // Results
   results     Json?
   error       String?
+  
+  // Source code scan specific fields
+  commitHash    String?
+  branchName    String?
+  filesScanned  Int?
+  linesScanned  Int?
+  
+  // Vulnerabilities found
+  vulnerabilities    Json?    // Array of findings
+  vulnerabilityCounts Json?   // { critical: 0, high: 0, medium: 0, low: 0, info: 0 }
+  
+  // Dependencies scanned (SBOM)
+  dependenciesScanned Int?
+  dependencyVulnerabilities Json?
   
   // Timing
   startedAt   DateTime?
@@ -390,6 +429,15 @@ model ScanJob {
   
   @@index([versionId])
   @@index([status])
+  @@index([scanType])
+}
+
+enum ScanType {
+  API_INTROSPECTION   // Scans tools/list, initialize (existing)
+  SOURCE_CODE         // Scans repository source code
+  DEPENDENCY          // Scans package.json, requirements.txt, etc.
+  SECRET_DETECTION    // Scans for leaked secrets
+  FULL                // All of the above
 }
 
 enum ScanJobStatus {

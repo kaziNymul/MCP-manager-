@@ -202,6 +202,7 @@ export default function ServersPage() {
 
 function RegisterServerModal({ onClose, onSuccess }: { onClose: () => void; onSuccess: () => void }) {
   const [loading, setLoading] = useState(false);
+  const [showAdvanced, setShowAdvanced] = useState(false);
   const [formData, setFormData] = useState({
     name: '',
     displayName: '',
@@ -209,6 +210,12 @@ function RegisterServerModal({ onClose, onSuccess }: { onClose: () => void; onSu
     endpoint: '',
     transport: 'HTTP_SSE',
     version: '1.0.0',
+    // Source code scanning fields
+    repositoryUrl: '',
+    repositoryBranch: 'main',
+    repositoryProvider: 'GITHUB',
+    repositoryPath: '/',
+    sourceCodeScanEnabled: false,
   });
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -236,13 +243,13 @@ function RegisterServerModal({ onClose, onSuccess }: { onClose: () => void; onSu
 
   return (
     <div className="modal-backdrop" onClick={onClose}>
-      <div className="modal" onClick={(e) => e.stopPropagation()}>
+      <div className="modal" style={{ maxWidth: '600px' }} onClick={(e) => e.stopPropagation()}>
         <div className="modal-header">
           <h2 className="modal-title">Register MCP Server</h2>
           <button className="modal-close" onClick={onClose}>×</button>
         </div>
         <form onSubmit={handleSubmit}>
-          <div className="modal-body">
+          <div className="modal-body" style={{ maxHeight: '70vh', overflowY: 'auto' }}>
             <div className="form-group">
               <label className="form-label">Server Name (slug)</label>
               <input
@@ -298,6 +305,120 @@ function RegisterServerModal({ onClose, onSuccess }: { onClose: () => void; onSu
                 <option value="HTTP_SSE">HTTP + SSE</option>
                 <option value="HTTP">HTTP only</option>
               </select>
+            </div>
+            <div className="form-group">
+              <label className="form-label">Version</label>
+              <input
+                type="text"
+                className="form-input"
+                placeholder="1.0.0"
+                value={formData.version}
+                onChange={(e) => setFormData({ ...formData, version: e.target.value })}
+                required
+              />
+            </div>
+
+            {/* Source Code Scanning Section */}
+            <div style={{ borderTop: '1px solid var(--border-color)', marginTop: '1rem', paddingTop: '1rem' }}>
+              <button
+                type="button"
+                className="btn btn-secondary btn-sm"
+                onClick={() => setShowAdvanced(!showAdvanced)}
+                style={{ marginBottom: '1rem' }}
+              >
+                {showAdvanced ? '▼' : '▶'} Source Code Scanning (Optional)
+              </button>
+
+              {showAdvanced && (
+                <>
+                  <div className="form-group">
+                    <label className="form-label">
+                      <input
+                        type="checkbox"
+                        checked={formData.sourceCodeScanEnabled}
+                        onChange={(e) => setFormData({ ...formData, sourceCodeScanEnabled: e.target.checked })}
+                        style={{ marginRight: '0.5rem' }}
+                      />
+                      Enable Source Code Scanning
+                    </label>
+                    <p className="text-sm text-muted">
+                      Scan the repository for security vulnerabilities, secrets, and dangerous patterns
+                    </p>
+                  </div>
+
+                  {formData.sourceCodeScanEnabled && (
+                    <>
+                      <div className="form-group">
+                        <label className="form-label">Repository Provider</label>
+                        <select
+                          className="form-select"
+                          value={formData.repositoryProvider}
+                          onChange={(e) => setFormData({ ...formData, repositoryProvider: e.target.value })}
+                        >
+                          <option value="GITHUB">GitHub</option>
+                          <option value="GITLAB">GitLab</option>
+                          <option value="BITBUCKET">Bitbucket</option>
+                          <option value="AZURE_DEVOPS">Azure DevOps</option>
+                        </select>
+                      </div>
+
+                      <div className="form-group">
+                        <label className="form-label">Repository URL</label>
+                        <input
+                          type="url"
+                          className="form-input"
+                          placeholder="https://github.com/org/repo"
+                          value={formData.repositoryUrl}
+                          onChange={(e) => setFormData({ ...formData, repositoryUrl: e.target.value })}
+                        />
+                        <span className="text-sm text-muted">
+                          Full URL to the repository containing the MCP server code
+                        </span>
+                      </div>
+
+                      <div className="form-group">
+                        <label className="form-label">Branch</label>
+                        <input
+                          type="text"
+                          className="form-input"
+                          placeholder="main"
+                          value={formData.repositoryBranch}
+                          onChange={(e) => setFormData({ ...formData, repositoryBranch: e.target.value })}
+                        />
+                      </div>
+
+                      <div className="form-group">
+                        <label className="form-label">Path within Repository</label>
+                        <input
+                          type="text"
+                          className="form-input"
+                          placeholder="/"
+                          value={formData.repositoryPath}
+                          onChange={(e) => setFormData({ ...formData, repositoryPath: e.target.value })}
+                        />
+                        <span className="text-sm text-muted">
+                          Path to the MCP server code within the repository (default: root)
+                        </span>
+                      </div>
+
+                      <div className="card" style={{ background: 'var(--bg-secondary)', padding: '1rem', marginTop: '1rem' }}>
+                        <h4 style={{ margin: '0 0 0.5rem 0', fontSize: '0.9rem' }}>🔐 Repository Access Token Required</h4>
+                        <p className="text-sm text-muted" style={{ margin: 0 }}>
+                          To scan source code, you'll need to provide a repository access token after registration.
+                          The token needs <strong>read</strong> access to repository contents.
+                        </p>
+                        <ul className="text-sm text-muted" style={{ margin: '0.5rem 0 0 1rem', padding: 0 }}>
+                          <li><strong>GitHub:</strong> Personal Access Token with <code>repo</code> or <code>contents:read</code> scope</li>
+                          <li><strong>GitLab:</strong> Personal Access Token with <code>read_repository</code> scope</li>
+                          <li><strong>Bitbucket:</strong> App Password with <code>repository:read</code></li>
+                          <li><strong>Azure DevOps:</strong> PAT with <code>Code (Read)</code></li>
+                        </ul>
+                      </div>
+                    </>
+                  )}
+                </>
+              )}
+            </div>
             </div>
             <div className="form-group">
               <label className="form-label">Version</label>

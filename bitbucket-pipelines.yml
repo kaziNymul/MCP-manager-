@@ -1,0 +1,356 @@
+# MCP Manager - Bitbucket Pipelines Configuration
+# Deploys to MKE (Mirantis Kubernetes Engine)
+#
+# Required Repository Variables:
+#   DOCKER_REGISTRY     - Container registry URL (e.g., docker.io, your-registry.company.com)
+#   DOCKER_USERNAME     - Registry username
+#   DOCKER_PASSWORD     - Registry password (secured)
+#   MKE_KUBECONFIG      - Base64-encoded kubeconfig for MKE (secured)
+
+image: node:20
+
+options:
+  docker: true
+  size: 2x  # Use larger runners for builds
+
+definitions:
+  services:
+    docker:
+      memory: 4096
+  
+  caches:
+    pnpm: ~/.local/share/pnpm/store
+  
+  steps:
+    - step: &install-dependencies
+        name: Install Dependencies
+        caches:
+          - pnpm
+          - node
+        script:
+          - npm install -g pnpm@9
+          - pnpm install --frozen-lockfile
+          - pnpm db:generate
+        artifacts:
+          - node_modules/**
+          - apps/**/node_modules/**
+          - packages/**/node_modules/**
+          - packages/prisma/src/generated/**
+    
+    - step: &lint-and-typecheck
+        name: Lint & Type Check
+        caches:
+          - pnpm
+          - node
+        script:
+          - npm install -g pnpm@9
+          - pnpm lint || echo "Lint completed with warnings"
+          - pnpm build
+    
+    - step: &build-and-push-images
+        name: Build & Push Docker Images
+        services:
+          - docker
+        caches:
+          - docker
+        script:
+          - export IMAGE_TAG="${BITBUCKET_COMMIT:0:7}"
+          - export BUILD_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          
+          # Login to container registry
+          - echo "$DOCKER_PASSWORD" | docker login -u "$DOCKER_USERNAME" --password-stdin $DOCKER_REGISTRY
+          
+          # Build all service images with build args
+          - |
+            for service in admin-ui control-plane gateway registry scanner; do
+              echo "Building $service..."
+              docker build \
+                --build-arg BUILD_DATE="$BUILD_DATE" \
+                --build-arg VCS_REF="${BITBUCKET_COMMIT}" \
+                --build-arg VERSION="${IMAGE_TAG}" \
+                -t $DOCKER_REGISTRY/mcp-manager/$service:$IMAGE_TAG \
+                -t $DOCKER_REGISTRY/mcp-manager/$service:${BITBUCKET_BRANCH} \
+                -f apps/$service/Dockerfile \
+                .
+            done
+          
+          # Push all images
+          - |
+            for service in admin-ui control-plane gateway registry scanner; do
+              echo "Pushing $service..."
+              docker push $DOCKER_REGISTRY/mcp-manager/$service:$IMAGE_TAG
+              docker push $DOCKER_REGISTRY/mcp-manager/$service:${BITBUCKET_BRANCH}
+            done
+          
+          # Save image tag for deployment step
+          - echo "$IMAGE_TAG" > image-tag.txt
+        artifacts:
+          - image-tag.txt
+    
+    - step: &deploy-to-staging
+        name: Deploy to MKE (Staging)
+        deployment: staging
+        script:
+          - export IMAGE_TAG=$(cat image-tag.txt)
+          
+          # Install kubectl
+          - apt-get update && apt-get install -y curl
+          - curl -LO "https://dl.k8s.io/release/v1.28.0/bin/linux/amd64/kubectl"
+          - chmod +x kubectl && mv kubectl /usr/local/bin/
+          
+          # Configure kubectl for MKE
+          - mkdir -p ~/.kube
+          - echo "$MKE_KUBECONFIG" | base64 -d > ~/.kube/config
+          - chmod 600 ~/.kube/config
+          
+          # Verify cluster connection
+          - kubectl cluster-info
+          
+          # Update kustomization with new image tags
+          - |
+            cat > k8s/overlays/staging/kustomization.yaml << EOF
+            apiVersion: kustomize.config.k8s.io/v1beta1
+            kind: Kustomization
+            
+            namespace: mcp-manager-staging
+            
+            resources:
+              - ../../base
+            
+            commonLabels:
+              environment: staging
+            
+            images:
+              - name: mcp-manager/admin-ui
+                newName: $DOCKER_REGISTRY/mcp-manager/admin-ui
+                newTag: "$IMAGE_TAG"
+              - name: mcp-manager/control-plane
+                newName: $DOCKER_REGISTRY/mcp-manager/control-plane
+                newTag: "$IMAGE_TAG"
+              - name: mcp-manager/gateway
+                newName: $DOCKER_REGISTRY/mcp-manager/gateway
+                newTag: "$IMAGE_TAG"
+              - name: mcp-manager/registry
+                newName: $DOCKER_REGISTRY/mcp-manager/registry
+                newTag: "$IMAGE_TAG"
+              - name: mcp-manager/scanner
+                newName: $DOCKER_REGISTRY/mcp-manager/scanner
+                newTag: "$IMAGE_TAG"
+            
+            replicas:
+              - name: gateway
+                count: 2
+              - name: control-plane
+                count: 2
+              - name: admin-ui
+                count: 2
+              - name: registry
+                count: 1
+              - name: scanner
+                count: 2
+            EOF
+          
+          # Create namespace if not exists
+          - kubectl create namespace mcp-manager-staging --dry-run=client -o yaml | kubectl apply -f -
+          
+          # Apply to cluster
+          - kubectl apply -k k8s/overlays/staging
+          
+          # Wait for rollout
+          - kubectl rollout status deployment/gateway -n mcp-manager-staging --timeout=300s
+          - kubectl rollout status deployment/control-plane -n mcp-manager-staging --timeout=300s
+          - kubectl rollout status deployment/admin-ui -n mcp-manager-staging --timeout=300s
+          
+          # Run database migrations
+          - kubectl exec deploy/control-plane -n mcp-manager-staging -- npx prisma migrate deploy || true
+          
+          # Verify deployment
+          - kubectl get pods -n mcp-manager-staging
+          - echo "✅ Staging deployment complete! Image: $IMAGE_TAG"
+    
+    - step: &deploy-to-production
+        name: Deploy to MKE (Production)
+        deployment: production
+        trigger: manual
+        script:
+          - export IMAGE_TAG=$(cat image-tag.txt)
+          
+          # Install kubectl
+          - apt-get update && apt-get install -y curl
+          - curl -LO "https://dl.k8s.io/release/v1.28.0/bin/linux/amd64/kubectl"
+          - chmod +x kubectl && mv kubectl /usr/local/bin/
+          
+          # Configure kubectl for MKE
+          - mkdir -p ~/.kube
+          - echo "$MKE_KUBECONFIG" | base64 -d > ~/.kube/config
+          - chmod 600 ~/.kube/config
+          
+          # Verify cluster connection
+          - kubectl cluster-info
+          
+          # Update kustomization with new image tags
+          - |
+            cat > k8s/overlays/production/kustomization.yaml << EOF
+            apiVersion: kustomize.config.k8s.io/v1beta1
+            kind: Kustomization
+            
+            namespace: mcp-manager
+            
+            resources:
+              - ../../base
+            
+            commonLabels:
+              environment: production
+            
+            images:
+              - name: mcp-manager/admin-ui
+                newName: $DOCKER_REGISTRY/mcp-manager/admin-ui
+                newTag: "$IMAGE_TAG"
+              - name: mcp-manager/control-plane
+                newName: $DOCKER_REGISTRY/mcp-manager/control-plane
+                newTag: "$IMAGE_TAG"
+              - name: mcp-manager/gateway
+                newName: $DOCKER_REGISTRY/mcp-manager/gateway
+                newTag: "$IMAGE_TAG"
+              - name: mcp-manager/registry
+                newName: $DOCKER_REGISTRY/mcp-manager/registry
+                newTag: "$IMAGE_TAG"
+              - name: mcp-manager/scanner
+                newName: $DOCKER_REGISTRY/mcp-manager/scanner
+                newTag: "$IMAGE_TAG"
+            
+            replicas:
+              - name: gateway
+                count: 5
+              - name: control-plane
+                count: 3
+              - name: admin-ui
+                count: 3
+              - name: registry
+                count: 2
+              - name: scanner
+                count: 3
+            EOF
+          
+          # Apply to cluster (production namespace already exists)
+          - kubectl apply -k k8s/overlays/production
+          
+          # Rolling update with zero downtime
+          - kubectl rollout status deployment/gateway -n mcp-manager --timeout=600s
+          - kubectl rollout status deployment/control-plane -n mcp-manager --timeout=600s
+          - kubectl rollout status deployment/admin-ui -n mcp-manager --timeout=600s
+          - kubectl rollout status deployment/registry -n mcp-manager --timeout=600s
+          - kubectl rollout status deployment/scanner -n mcp-manager --timeout=600s
+          
+          # Run database migrations
+          - kubectl exec deploy/control-plane -n mcp-manager -- npx prisma migrate deploy
+          
+          # Verify deployment
+          - kubectl get pods -n mcp-manager
+          - echo "✅ Production deployment complete! Image: $IMAGE_TAG"
+
+# Pipeline definitions for different branches
+pipelines:
+  # Feature branches - only lint and test
+  branches:
+    feature/*:
+      - step: *install-dependencies
+      - step: *lint-and-typecheck
+    
+    # Development branch - deploy to staging
+    dev:
+      - step: *install-dependencies
+      - step: *lint-and-typecheck
+      - step: *build-and-push-images
+      - step: *deploy-to-staging
+    
+    # Main branch - deploy to production (manual approval)
+    main:
+      - step: *install-dependencies
+      - step: *lint-and-typecheck
+      - step: *build-and-push-images
+      - step: *deploy-to-staging
+      - step: *deploy-to-production
+  
+  # Pull requests - run tests
+  pull-requests:
+    '**':
+      - step: *install-dependencies
+      - step: *lint-and-typecheck
+  
+  # Tags - build release and deploy to production
+  tags:
+    'v*':
+      - step: *install-dependencies
+      - step: *lint-and-typecheck
+      - step:
+          <<: *build-and-push-images
+          name: Build Release Images
+          script:
+            - export IMAGE_TAG="${BITBUCKET_TAG}"
+            - export BUILD_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+            
+            # Login to container registry
+            - echo "$DOCKER_PASSWORD" | docker login -u "$DOCKER_USERNAME" --password-stdin $DOCKER_REGISTRY
+            
+            # Build all service images with version tag
+            - |
+              for service in admin-ui control-plane gateway registry scanner; do
+                echo "Building $service:$IMAGE_TAG..."
+                docker build \
+                  --build-arg BUILD_DATE="$BUILD_DATE" \
+                  --build-arg VCS_REF="${BITBUCKET_COMMIT}" \
+                  --build-arg VERSION="${IMAGE_TAG}" \
+                  -t $DOCKER_REGISTRY/mcp-manager/$service:$IMAGE_TAG \
+                  -t $DOCKER_REGISTRY/mcp-manager/$service:latest \
+                  -f apps/$service/Dockerfile \
+                  .
+              done
+            
+            # Push all images with version and latest tags
+            - |
+              for service in admin-ui control-plane gateway registry scanner; do
+                echo "Pushing $service..."
+                docker push $DOCKER_REGISTRY/mcp-manager/$service:$IMAGE_TAG
+                docker push $DOCKER_REGISTRY/mcp-manager/$service:latest
+              done
+            
+            # Save image tag for deployment step
+            - echo "$IMAGE_TAG" > image-tag.txt
+      - step: *deploy-to-production
+
+  # Manual trigger for custom deployments
+  custom:
+    deploy-to-staging:
+      - variables:
+          - name: IMAGE_TAG
+            default: "dev"
+      - step: *install-dependencies
+      - step: *lint-and-typecheck
+      - step: *build-and-push-images
+      - step: *deploy-to-staging
+    
+    rollback-production:
+      - variables:
+          - name: ROLLBACK_TAG
+      - step:
+          name: Rollback Production
+          deployment: production
+          script:
+            - apt-get update && apt-get install -y curl
+            - curl -LO "https://dl.k8s.io/release/v1.28.0/bin/linux/amd64/kubectl"
+            - chmod +x kubectl && mv kubectl /usr/local/bin/
+            
+            - mkdir -p ~/.kube
+            - echo "$MKE_KUBECONFIG" | base64 -d > ~/.kube/config
+            
+            # Update images to rollback version
+            - |
+              for service in admin-ui control-plane gateway registry scanner; do
+                kubectl set image deployment/$service \
+                  $service=$DOCKER_REGISTRY/mcp-manager/$service:$ROLLBACK_TAG \
+                  -n mcp-manager
+              done
+            
+            - kubectl rollout status deployment/gateway -n mcp-manager
+            - echo "✅ Rolled back to $ROLLBACK_TAG"

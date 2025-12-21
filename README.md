@@ -176,20 +176,52 @@ Request → Anomaly Check → Threat Detection → Policy Check → Proxy → Re
 | **SQL Injection** | `' OR 1=1 --` | Database attacks |
 | **Credential Leak** | API keys in responses | `sk-...`, `ghp_...` |
 
+### Level 3: Source Code Scanning (Repository Analysis)
+
+For deeper security analysis, MCP Manager can scan the actual **source code** of MCP servers:
+
+```
+Repository URL → Fetch Source → Code Analysis → Secret Detection → Vulnerability Report
+```
+
+**Supported Providers:**
+
+| Provider | Token Type | Required Scope |
+|----------|-----------|----------------|
+| **GitHub** | PAT (Classic/Fine-grained) | `repo` or `contents:read` |
+| **GitLab** | Personal Access Token | `read_repository` |
+| **Bitbucket** | App Password | `Repositories: Read` |
+| **Azure DevOps** | PAT | `Code (Read)` |
+
+**What Gets Detected:**
+
+| Category | Examples | Severity |
+|----------|----------|----------|
+| **Command Injection** | `child_process.exec(userInput)` | CRITICAL |
+| **SQL Injection** | `query("SELECT * " + userInput)` | CRITICAL |
+| **Hardcoded Secrets** | `apiKey = "sk-..."` | CRITICAL |
+| **Path Traversal** | `readFile(userPath)` | HIGH |
+| **Insecure Crypto** | `crypto.createCipher('des', ...)` | HIGH |
+
+📖 See [Source Code Scanning Documentation](docs/SOURCE_CODE_SCANNING.md) for full setup instructions.
+
 ## ✨ Features
 
 ### Core Features
 - ✅ Multi-tenant organization/team structure
 - ✅ MCP server registration and approval workflow
 - ✅ Automatic vulnerability scanning
+- ✅ **Source code scanning** (GitHub, GitLab, Bitbucket, Azure DevOps)
 - ✅ Risk scoring with CWE references
 - ✅ Policy-based access control
 - ✅ Full audit trail
 - ✅ Real-time threat detection
 - ✅ Rate limiting per user/tool
+- ✅ Secret detection in source code
 
 ### Integrations
 - ✅ GitHub Copilot Enterprise allowlist sync
+- ✅ GitHub/GitLab/Bitbucket/Azure DevOps source code access
 - ✅ OIDC/JWT authentication
 - ✅ Prometheus metrics
 - ✅ Kubernetes deployment ready

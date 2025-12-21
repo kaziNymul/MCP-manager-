@@ -1,0 +1,98 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: mcp-manager-staging
+
+resources:
+  - ../../base
+
+commonLabels:
+  environment: staging
+
+# Image tags will be updated by CI/CD pipeline
+images:
+  - name: mcp-manager/admin-ui
+    newName: mcp-manager/admin-ui
+    newTag: dev
+  - name: mcp-manager/control-plane
+    newName: mcp-manager/control-plane
+    newTag: dev
+  - name: mcp-manager/gateway
+    newName: mcp-manager/gateway
+    newTag: dev
+  - name: mcp-manager/registry
+    newName: mcp-manager/registry
+    newTag: dev
+  - name: mcp-manager/scanner
+    newName: mcp-manager/scanner
+    newTag: dev
+
+# Staging uses fewer replicas
+replicas:
+  - name: gateway
+    count: 2
+  - name: control-plane
+    count: 2
+  - name: admin-ui
+    count: 2
+  - name: registry
+    count: 1
+  - name: scanner
+    count: 2
+
+# Staging-specific patches
+patches:
+  # Reduce resource requests for staging
+  - patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: gateway
+      spec:
+        template:
+          spec:
+            containers:
+              - name: gateway
+                resources:
+                  requests:
+                    cpu: "100m"
+                    memory: "256Mi"
+                  limits:
+                    cpu: "500m"
+                    memory: "512Mi"
+  
+  - patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: control-plane
+      spec:
+        template:
+          spec:
+            containers:
+              - name: control-plane
+                resources:
+                  requests:
+                    cpu: "100m"
+                    memory: "256Mi"
+                  limits:
+                    cpu: "500m"
+                    memory: "512Mi"
+  
+  - patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: scanner
+      spec:
+        template:
+          spec:
+            containers:
+              - name: scanner
+                resources:
+                  requests:
+                    cpu: "200m"
+                    memory: "512Mi"
+                  limits:
+                    cpu: "1000m"
+                    memory: "1Gi"

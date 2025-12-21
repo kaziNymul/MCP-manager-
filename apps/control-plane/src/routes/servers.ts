@@ -760,4 +760,233 @@ export async function serverRoutes(fastify: FastifyInstance) {
       ...validation,
     };
   });
+
+  // =========================================================================
+  // SOURCE CODE SCANNING
+  // =========================================================================
+
+  // Trigger source code scan for a server
+  fastify.post<{ Params: { id: string } }>('/:id/scan/source-code', {
+    preHandler: [fastify.authenticate],
+  }, async (request, reply) => {
+    const { id } = request.params;
+    const user = request.user!;
+    const { repositoryToken } = request.body as { repositoryToken?: string };
+
+    const server = await prisma.server.findFirst({
+      where: { id, orgId: user.orgId },
+      include: {
+        versions: {
+          orderBy: { createdAt: 'desc' },
+          take: 1,
+        },
+      },
+    });
+
+    if (!server) {
+      throw new NotFoundError('Server', id);
+    }
+
+    if (!server.repositoryUrl) {
+      return reply.status(400).send({
+        error: 'Source code scanning not configured',
+        message: 'Please add a repository URL to enable source code scanning',
+      });
+    }
+
+    // Import source code scanner dynamically
+    const { SourceCodeScanner, getRepositoryAccessInfo } = await import('@mcp-manager/shared');
+
+    // Get token from request or environment
+    const token = repositoryToken || 
+      process.env.REPOSITORY_ACCESS_TOKEN ||
+      process.env.GITHUB_TOKEN;
+
+    if (!token) {
+      const accessInfo = getRepositoryAccessInfo(server.repositoryProvider as any || 'GITHUB');
+      return reply.status(400).send({
+        error: 'Repository access token required',
+        message: 'Please provide a repository access token',
+        instructions: accessInfo.instructions,
+        requiredScopes: accessInfo.requiredScopes,
+        setupUrl: accessInfo.setupUrl,
+      });
+    }
+
+    // Get latest version
+    const version = server.versions[0];
+    if (!version) {
+      return reply.status(400).send({
+        error: 'No version found',
+        message: 'Please create a server version first',
+      });
+    }
+
+    // Create scan job
+    const scanJob = await prisma.scanJob.create({
+      data: {
+        versionId: version.id,
+        scanType: 'SOURCE_CODE',
+        status: 'RUNNING',
+        startedAt: new Date(),
+        branchName: server.repositoryBranch || 'main',
+      },
+    });
+
+    // Run scan in background (in production, use a job queue)
+    const scanner = new SourceCodeScanner({
+      provider: (server.repositoryProvider as any) || 'GITHUB',
+      url: server.repositoryUrl,
+      branch: server.repositoryBranch || 'main',
+      path: server.repositoryPath || '/',
+      token,
+    });
+
+    // Start async scan
+    scanner.scanSourceCode().then(async (result) => {
+      // Update scan job
+      await prisma.scanJob.update({
+        where: { id: scanJob.id },
+        data: {
+          status: result.success ? 'COMPLETED' : 'FAILED',
+          completedAt: new Date(),
+          results: result as any,
+          error: result.error,
+          filesScanned: result.filesScanned,
+          linesScanned: result.linesScanned,
+          commitHash: result.repository.commitHash,
+          vulnerabilities: result.vulnerabilities as any,
+          vulnerabilityCounts: result.vulnerabilityCounts as any,
+        },
+      });
+
+      // Update version risk score (combine with API scan if exists)
+      const existingScore = version.riskScore || 0;
+      const combinedScore = Math.min(100, existingScore + result.riskScore);
+
+      await prisma.serverVersion.update({
+        where: { id: version.id },
+        data: {
+          riskScore: combinedScore,
+          riskLevel: combinedScore <= 25 ? 'LOW' :
+                     combinedScore <= 50 ? 'MEDIUM' :
+                     combinedScore <= 75 ? 'HIGH' : 'CRITICAL',
+        },
+      });
+
+      // Audit event
+      await prisma.auditEvent.create({
+        data: {
+          orgId: user.orgId,
+          userId: user.userId,
+          actorType: 'SYSTEM',
+          eventType: 'SOURCE_CODE_SCAN_COMPLETED',
+          action: 'scan',
+          resourceType: 'server_version',
+          resourceId: version.id,
+          resourceName: `${server.name}@${version.version}`,
+          serverName: server.name,
+          status: result.success ? 'SUCCESS' : 'FAILURE',
+          metadata: {
+            filesScanned: result.filesScanned,
+            vulnerabilities: result.vulnerabilityCounts,
+            riskScore: result.riskScore,
+          },
+        },
+      });
+    }).catch(async (error) => {
+      await prisma.scanJob.update({
+        where: { id: scanJob.id },
+        data: {
+          status: 'FAILED',
+          completedAt: new Date(),
+          error: error.message,
+        },
+      });
+    });
+
+    return reply.status(202).send({
+      message: 'Source code scan started',
+      scanJobId: scanJob.id,
+      status: 'RUNNING',
+    });
+  });
+
+  // Get source code scan results
+  fastify.get<{ Params: { id: string } }>('/:id/scan/source-code', {
+    preHandler: [fastify.authenticate],
+  }, async (request, reply) => {
+    const { id } = request.params;
+    const user = request.user!;
+
+    const server = await prisma.server.findFirst({
+      where: { id, orgId: user.orgId },
+      include: {
+        versions: {
+          orderBy: { createdAt: 'desc' },
+          take: 1,
+          include: {
+            scanJobs: {
+              where: { scanType: 'SOURCE_CODE' },
+              orderBy: { createdAt: 'desc' },
+              take: 5,
+            },
+          },
+        },
+      },
+    });
+
+    if (!server) {
+      throw new NotFoundError('Server', id);
+    }
+
+    const version = server.versions[0];
+    const scanJobs = version?.scanJobs || [];
+
+    return {
+      repositoryUrl: server.repositoryUrl,
+      repositoryBranch: server.repositoryBranch,
+      repositoryProvider: server.repositoryProvider,
+      sourceCodeScanEnabled: server.sourceCodeScanEnabled,
+      scanJobs: scanJobs.map((job) => ({
+        id: job.id,
+        status: job.status,
+        scanType: job.scanType,
+        startedAt: job.startedAt,
+        completedAt: job.completedAt,
+        filesScanned: job.filesScanned,
+        linesScanned: job.linesScanned,
+        vulnerabilityCounts: job.vulnerabilityCounts,
+        error: job.error,
+      })),
+      latestScan: scanJobs[0] ? {
+        id: scanJobs[0].id,
+        status: scanJobs[0].status,
+        completedAt: scanJobs[0].completedAt,
+        filesScanned: scanJobs[0].filesScanned,
+        linesScanned: scanJobs[0].linesScanned,
+        vulnerabilities: scanJobs[0].vulnerabilities,
+        vulnerabilityCounts: scanJobs[0].vulnerabilityCounts,
+      } : null,
+    };
+  });
+
+  // Get repository access requirements
+  fastify.get('/scan/source-code/requirements', {
+    preHandler: [fastify.authenticate],
+  }, async (request, reply) => {
+    const { provider } = request.query as { provider?: string };
+    const { getRepositoryAccessInfo } = await import('@mcp-manager/shared');
+
+    if (provider) {
+      return getRepositoryAccessInfo(provider as any);
+    }
+
+    return {
+      github: getRepositoryAccessInfo('GITHUB'),
+      gitlab: getRepositoryAccessInfo('GITLAB'),
+      bitbucket: getRepositoryAccessInfo('BITBUCKET'),
+      azureDevops: getRepositoryAccessInfo('AZURE_DEVOPS'),
+    };
+  });
 }
