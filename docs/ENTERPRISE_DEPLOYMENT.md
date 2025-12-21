@@ -8,16 +8,17 @@ Kubernetes, and high availability.
 ## Table of Contents
 
 1. [Prerequisites](#prerequisites)
-2. [How Security Scanning Works](#how-security-scanning-works)
-3. [GitHub Enterprise Integration](#github-enterprise-integration)
-4. [Kubernetes Deployment](#kubernetes-deployment)
-5. [MKE Deployment with Bitbucket CI/CD](#mke-mirantis-kubernetes-engine-deployment-with-bitbucket-cicd)
-6. [High Availability Architecture](#high-availability-architecture)
-7. [Multi-Tenant Configuration](#multi-tenant-configuration)
-8. [Security Hardening](#security-hardening)
-9. [Monitoring & Observability](#monitoring--observability)
-10. [Disaster Recovery](#disaster-recovery)
-11. [Troubleshooting](#troubleshooting)
+2. [Understanding the Stack: Prisma & PostgreSQL](#understanding-the-stack-prisma--postgresql)
+3. [How Security Scanning Works](#how-security-scanning-works)
+4. [GitHub Enterprise Integration](#github-enterprise-integration)
+5. [Kubernetes Deployment](#kubernetes-deployment)
+6. [MKE Deployment with Bitbucket CI/CD](#mke-mirantis-kubernetes-engine-deployment-with-bitbucket-cicd)
+7. [High Availability Architecture](#high-availability-architecture)
+8. [Multi-Tenant Configuration](#multi-tenant-configuration)
+9. [Security Hardening](#security-hardening)
+10. [Monitoring & Observability](#monitoring--observability)
+11. [Disaster Recovery](#disaster-recovery)
+12. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -34,6 +35,229 @@ Kubernetes, and high availability.
 - **GitHub Enterprise** (for Copilot allowlist sync)
 - **OIDC Provider** (Okta, Azure AD, etc.)
 - **Prometheus/Grafana** (for monitoring)
+
+---
+
+## Understanding the Stack: Prisma & PostgreSQL
+
+### What is Prisma?
+
+**Prisma** is an **Object-Relational Mapper (ORM)** that acts as a bridge between your Node.js application and the database.
+
+**Think of it like a translator:**
+
+```
+Your TypeScript Code         Prisma              PostgreSQL Database
+    ↓                          ↓                        ↓
+const server = await    →   SELECT * FROM       →   SQL Query
+prisma.server             servers WHERE id =       Execution
+.findUnique({...})        $1 LIMIT 1
+
+Result:
+{
+  id: "srv_123",
+  name: "my-server",
+  status: "APPROVED"
+}  ← Fully typed object ✓
+```
+
+**Why use Prisma instead of raw SQL?**
+
+| Aspect | Raw SQL | Prisma |
+|--------|---------|--------|
+| **Type Safety** | ❌ No (string queries) | ✅ Full TypeScript types |
+| **Syntax** | `SELECT * FROM...` | `prisma.server.findUnique(...)` |
+| **Error Catching** | ❌ Runtime errors | ✅ Compile-time errors |
+| **Auto-completion** | ❌ Manual | ✅ IDE suggestions |
+| **Migrations** | ❌ Manual SQL scripts | ✅ Auto-generated |
+
+### What is PostgreSQL?
+
+**PostgreSQL** is a **relational database management system (RDBMS)** that stores all your data persistently on disk.
+
+**It stores everything MCP Manager needs:**
+
+```
+PostgreSQL Database Structure:
+
+┌─────────────────────────────────────────────────────────────┐
+│              MCP Manager Database Tables                      │
+├─────────────────────────────────────────────────────────────┤
+│                                                              │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐      │
+│  │   users      │  │ organizations│  │    teams     │      │
+│  ├──────────────┤  ├──────────────┤  ├──────────────┤      │
+│  │ id (PK)      │  │ id (PK)      │  │ id (PK)      │      │
+│  │ email        │  │ name         │  │ name         │      │
+│  │ password     │  │ slug         │  │ organizationId      │
+│  │ organizationId   │ createdAt    │  │ createdAt    │      │
+│  └──────────────┘  └──────────────┘  └──────────────┘      │
+│                                                              │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐      │
+│  │   servers    │  │  scan_jobs   │  │  policies    │      │
+│  ├──────────────┤  ├──────────────┤  ├──────────────┤      │
+│  │ id (PK)      │  │ id (PK)      │  │ id (PK)      │      │
+│  │ name         │  │ serverId (FK)│  │ name         │      │
+│  │ endpoint     │  │ status       │  │ teamId (FK)  │      │
+│  │ riskScore    │  │ vulnerabilities  │ tools      │      │
+│  │ teamId (FK)  │  │ createdAt    │  │ createdAt    │      │
+│  │ repositoryUrl│  │ completedAt  │  └──────────────┘      │
+│  └──────────────┘  └──────────────┘                         │
+│                                                              │
+│  ┌──────────────┐  ┌──────────────┐                        │
+│  │ audit_logs   │  │ integrations  │                        │
+│  ├──────────────┤  ├──────────────┤                        │
+│  │ id (PK)      │  │ id (PK)      │                        │
+│  │ userId (FK)  │  │ organizationId(FK)                     │
+│  │ action       │  │ type (GITHUB) │                        │
+│  │ resource     │  │ config       │                        │
+│  │ timestamp    │  │ accessToken  │                        │
+│  └──────────────┘  └──────────────┘                        │
+│                                                              │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### How They Work Together
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│                    MCP Manager Application                        │
+├──────────────────────────────────────────────────────────────────┤
+│                                                                   │
+│  ┌─────────────────────────────────────────────────────────┐    │
+│  │           TypeScript/JavaScript Code                    │    │
+│  │                                                          │    │
+│  │  // When admin registers a new MCP server:              │    │
+│  │  const server = await prisma.server.create({            │    │
+│  │    data: {                                              │    │
+│  │      name: "database-mcp",                              │    │
+│  │      endpoint: "https://mcp-db.internal:3040",          │    │
+│  │      teamId: "team_123",                                │    │
+│  │      riskScore: 35,                                     │    │
+│  │      status: "PENDING_REVIEW"                           │    │
+│  │    }                                                    │    │
+│  │  });                                                    │    │
+│  │                                                          │    │
+│  └────────────────────────┬─────────────────────────────────┘   │
+│                           │                                       │
+│                           │ Prisma generates SQL                 │
+│                           ▼                                       │
+│  ┌──────────────────────────────────────────────────────────┐   │
+│  │                    Prisma ORM                            │   │
+│  │                                                          │   │
+│  │  INSERT INTO servers (                                  │   │
+│  │    name, endpoint, teamId, riskScore, status,           │   │
+│  │    createdAt, updatedAt                                 │   │
+│  │  ) VALUES (                                             │   │
+│  │    'database-mcp',                                      │   │
+│  │    'https://mcp-db.internal:3040',                      │   │
+│  │    'team_123',                                          │   │
+│  │    35,                                                  │   │
+│  │    'PENDING_REVIEW',                                    │   │
+│  │    NOW(), NOW()                                         │   │
+│  │  );                                                     │   │
+│  │                                                          │   │
+│  └────────────────────────┬─────────────────────────────────┘   │
+│                           │                                       │
+│                           │ SQL executed                         │
+│                           ▼                                       │
+│  ┌──────────────────────────────────────────────────────────┐   │
+│  │              PostgreSQL Database                        │   │
+│  │                                                          │   │
+│  │  servers table:                                         │   │
+│  │  ┌────────────────────────────────────────────────────┐ │   │
+│  │  │ id │ name │ endpoint │ teamId │ riskScore │ status │ │   │
+│  │  ├────┴──────┴──────────┴────────┴───────────┴────────┤ │   │
+│  │  │ ... existing rows ...                               │ │   │
+│  │  │ srv_xyz│database-mcp│https://mcp-db..│team_123│35 │...│ │   │
+│  │  │        │             │                                 │ │   │
+│  │  └────────────────────────────────────────────────────┘ │   │
+│  │                                                          │   │
+│  │  ✅ Data now persists on disk!                          │   │
+│  │  ✅ Survives app restarts                              │   │
+│  │  ✅ Available to all app instances                     │   │
+│  │  ✅ Can be backed up and restored                      │   │
+│  │                                                          │   │
+│  └──────────────────────────────────────────────────────────┘   │
+│                                                                   │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+### Why PostgreSQL Over Alternatives?
+
+| Database | Speed | Reliability | Cost | Complex Queries | Best For |
+|----------|-------|-------------|------|-----------------|----------|
+| **PostgreSQL** | ⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ | Low | ✅ Excellent | Enterprise apps |
+| **MySQL** | ⭐⭐⭐⭐ | ⭐⭐⭐⭐ | Low | ⭐⭐⭐ | Web apps |
+| **MongoDB** | ⭐⭐⭐⭐⭐ | ⭐⭐⭐ | Low | ❌ Limited | Document storage |
+| **Redis** | ⭐⭐⭐⭐⭐ | ⭐⭐ | Low | ❌ None | Caching only |
+
+**For MCP Manager, PostgreSQL is perfect because:**
+- ✅ **ACID compliance** - Guarantees data consistency
+- ✅ **Complex queries** - Can correlate users, teams, policies, audit logs
+- ✅ **JSON support** - Stores complex scan results
+- ✅ **Proven reliability** - Used by enterprises worldwide
+- ✅ **Excellent Prisma support** - First-class integration
+- ✅ **Mature ecosystem** - Managed services (AWS RDS, Azure Database, GCP Cloud SQL)
+
+### Data Persistence Example
+
+**Scenario: What happens when MCP Manager restarts?**
+
+```typescript
+// Deployment scenario: Rolling update on MKE
+// Old pod shuts down → New pod starts up
+
+// ❌ If we used in-memory storage:
+let approvedServers = []; // Lost when app restarts!
+
+// ✅ With PostgreSQL + Prisma:
+const servers = await prisma.server.findMany({
+  where: { status: "APPROVED" }
+});
+// Returns: [
+//   { id: "srv_123", name: "database-mcp", status: "APPROVED", ... },
+//   { id: "srv_456", name: "api-mcp", status: "APPROVED", ... }
+// ]
+// Data persists! ✅ No data loss!
+```
+
+### Schema Versioning
+
+Prisma manages database schema changes through **migrations**:
+
+```bash
+# Make a change to schema.prisma
+# Add new field to Server model:
+# sourceCodeScanEnabled Boolean @default(false)
+
+# Create a migration
+pnpm prisma migrate dev --name add_source_code_scanning
+
+# This generates SQL like:
+# ALTER TABLE servers ADD COLUMN sourceCodeScanEnabled BOOLEAN DEFAULT false;
+
+# Deploy to production
+kubectl exec deploy/control-plane -n mcp-manager -- npx prisma migrate deploy
+# Runs all pending migrations ✅
+```
+
+### Backup & Restore
+
+**PostgreSQL allows you to backup everything:**
+
+```bash
+# Backup entire database
+pg_dump -U mcp_user mcp_manager > backup.sql
+
+# Restore
+psql -U mcp_user mcp_manager < backup.sql
+
+# On Kubernetes with external database:
+# AWS RDS → Automated daily snapshots
+# Azure Database → Geo-redundant backups
+# GCP Cloud SQL → Point-in-time recovery
+```
 
 ---
 
