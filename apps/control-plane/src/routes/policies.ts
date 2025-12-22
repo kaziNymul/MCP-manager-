@@ -94,7 +94,7 @@ export async function policyRoutes(fastify: FastifyInstance) {
         teamId: data.teamId,
         priority: data.priority || 0,
         type: data.type,
-        rules: data.rules,
+        rules: data.rules as any,
         isEnabled: data.isEnabled ?? true,
       },
       include: {
@@ -135,7 +135,7 @@ export async function policyRoutes(fastify: FastifyInstance) {
         teamId: data.teamId,
         priority: data.priority,
         type: data.type,
-        rules: data.rules,
+        rules: data.rules as any,
         isEnabled: data.isEnabled,
       },
       include: {

@@ -43,7 +43,7 @@ export class McpProxy {
         throw new Error(`Backend returned ${response.status}: ${response.statusText}`);
       }
 
-      const data = await response.json();
+      const data = await response.json() as { error?: { message?: string }; result: unknown };
 
       if (data.error) {
         throw new Error(data.error.message || 'Backend error');

@@ -213,7 +213,7 @@ export class AnomalyDetector {
           severity: 'LOW',
           description: `Access at unusual hour (${currentHour}:00)`,
           currentValue: currentHour,
-          expectedValue: Array.from(profile.metrics.typicalHours)[0],
+          expectedValue: Array.from(profile.metrics.typicalHours)[0] ?? 9,
           deviation: 1,
         });
       }

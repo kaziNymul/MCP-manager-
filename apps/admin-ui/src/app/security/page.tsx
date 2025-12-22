@@ -2,17 +2,7 @@
 
 import { useState } from 'react';
 import useSWR from 'swr';
-
-const CONTROL_PLANE_URL = process.env.CONTROL_PLANE_URL || 'http://localhost:3001';
-const DEV_TOKEN = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJhdXRoMHxhZG1pbjEyMyIsImlzcyI6Im1jcC1tYW5hZ2VyLWRldiIsImF1ZCI6Im1jcC1tYW5hZ2VyIiwiaWF0IjoxNzAzMTU0MDAwfQ.placeholder';
-
-const fetcher = async (url: string) => {
-  const res = await fetch(url, {
-    headers: { 'Authorization': `Bearer ${DEV_TOKEN}` },
-  });
-  if (!res.ok) throw new Error('Failed to fetch');
-  return res.json();
-};
+import { fetcher, CONTROL_PLANE_URL } from '@/lib/auth';
 
 type ThreatType = 
   | 'PROMPT_INJECTION'

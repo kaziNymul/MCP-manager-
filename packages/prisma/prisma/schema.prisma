@@ -561,6 +561,7 @@ enum AuditStatus {
   SUCCESS
   FAILURE
   BLOCKED
+  FLAGGED
 }
 
 // ============================================================================

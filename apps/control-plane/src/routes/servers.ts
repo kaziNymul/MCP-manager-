@@ -889,9 +889,9 @@ export async function serverRoutes(fastify: FastifyInstance) {
           status: result.success ? 'SUCCESS' : 'FAILURE',
           metadata: {
             filesScanned: result.filesScanned,
-            vulnerabilities: result.vulnerabilityCounts,
+            vulnerabilities: result.vulnerabilityCounts as any,
             riskScore: result.riskScore,
-          },
+          } as any,
         },
       });
     }).catch(async (error) => {

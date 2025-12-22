@@ -92,15 +92,15 @@ async function processQueue() {
 
           // Create new schemas
           await prisma.toolSchema.createMany({
-            data: result.tools.map((tool) => ({
+            data: result.tools.map((tool: any) => ({
               versionId: job.version.id,
               name: tool.name,
               displayName: tool.name,
               description: tool.description,
-              inputSchema: tool.inputSchema,
-              capabilities: tool.capabilities,
-              riskFlags: tool.riskFlags,
-              isDangerous: tool.isDangerous,
+              inputSchema: tool.inputSchema as any,
+              capabilities: tool.capabilities || [],
+              riskFlags: tool.riskFlags || [],
+              isDangerous: tool.isDangerous || false,
             })),
           });
         }
@@ -118,12 +118,12 @@ async function processQueue() {
           data: {
             status: finalStatus,
             riskScore: result.riskAssessment.score,
-            riskLevel: result.riskAssessment.level,
+            riskLevel: result.riskAssessment.level as any,
             evidenceBundle: {
               scannedAt: result.scannedAt,
               toolCount: result.tools.length,
               capabilities: result.riskAssessment.capabilities,
-              dangerousTools: result.tools.filter((t) => t.isDangerous).map((t) => t.name),
+              dangerousTools: result.tools.filter((t: any) => t.isDangerous).map((t: any) => t.name),
               riskFlags: result.riskAssessment.flags,
               warnings: result.riskAssessment.warnings,
             },
@@ -156,7 +156,7 @@ async function processQueue() {
           data: {
             status: 'COMPLETED',
             completedAt: new Date(),
-            results: result,
+            results: result as any,
           },
         });
 

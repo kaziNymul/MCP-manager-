@@ -13,10 +13,15 @@ declare module 'fastify' {
   }
 }
 
-const JWT_SECRET = process.env.JWT_SECRET || 'dev-secret-change-in-production';
 const AUTH_MODE = process.env.AUTH_MODE || 'development';
-const JWT_ISSUER = process.env.JWT_ISSUER || 'mcp-manager-dev';
+const JWT_SECRET = process.env.JWT_SECRET;
+const JWT_ISSUER = process.env.JWT_ISSUER || 'mcp-manager';
 const JWT_AUDIENCE = process.env.JWT_AUDIENCE || 'mcp-manager';
+
+// Validate required environment variables
+if (!JWT_SECRET) {
+  throw new Error('JWT_SECRET environment variable is required');
+}
 
 async function authPluginImpl(fastify: FastifyInstance) {
   // Extract correlation ID from headers

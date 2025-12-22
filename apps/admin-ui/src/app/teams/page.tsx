@@ -2,17 +2,7 @@
 
 import { useState } from 'react';
 import useSWR, { mutate } from 'swr';
-
-const CONTROL_PLANE_URL = process.env.CONTROL_PLANE_URL || 'http://localhost:3001';
-const DEV_TOKEN = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJhdXRoMHxhZG1pbjEyMyIsImlzcyI6Im1jcC1tYW5hZ2VyLWRldiIsImF1ZCI6Im1jcC1tYW5hZ2VyIiwiaWF0IjoxNzAzMTU0MDAwfQ.placeholder';
-
-const fetcher = async (url: string) => {
-  const res = await fetch(url, {
-    headers: { 'Authorization': `Bearer ${DEV_TOKEN}` },
-  });
-  if (!res.ok) throw new Error('Failed to fetch');
-  return res.json();
-};
+import { fetcher, CONTROL_PLANE_URL, getAuthHeaders } from '@/lib/auth';
 
 export default function TeamsPage() {
   const [showCreateModal, setShowCreateModal] = useState(false);
@@ -34,7 +24,7 @@ export default function TeamsPage() {
     try {
       await fetch(`${CONTROL_PLANE_URL}/api/teams/${teamId}`, {
         method: 'DELETE',
-        headers: { 'Authorization': `Bearer ${DEV_TOKEN}` },
+        headers: getAuthHeaders(),
       });
       mutate(`${CONTROL_PLANE_URL}/api/orgs/${org.id}/teams`);
     } catch (e) {
@@ -195,7 +185,7 @@ function TeamModal({
       const res = await fetch(url, {
         method,
         headers: {
-          'Authorization': `Bearer ${DEV_TOKEN}`,
+          ...getAuthHeaders(),
           'Content-Type': 'application/json',
         },
         body: JSON.stringify(formData),

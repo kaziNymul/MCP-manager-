@@ -728,7 +728,7 @@ export class SourceCodeScanner {
         throw new Error(`Failed to list files: ${response.status}`);
       }
       
-      const data = await response.json();
+      const data = await response.json() as any;
       
       if (provider === 'GITHUB') {
         if (!Array.isArray(data)) {

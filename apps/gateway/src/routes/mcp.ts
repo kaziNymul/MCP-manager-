@@ -19,7 +19,8 @@ import type { JsonRpcRequest, UserContext, ThreatDetectionResult, AnomalyResult 
 import { PolicyEngine } from '../services/policy-engine.js';
 import { McpProxy } from '../services/mcp-proxy.js';
 
-const ajv = new Ajv({ allErrors: true, strict: false });
+// @ts-ignore - Ajv import compatibility
+const ajv = new (Ajv.default || Ajv)({ allErrors: true, strict: false });
 
 interface McpParams {
   org: string;
@@ -397,7 +398,7 @@ async function handleToolsCall(
         metadata: { 
           anomalyScore: anomalyResult.score,
           anomalies: anomalyResult.anomalies.map(a => a.type),
-        },
+        } as any,
         durationMs: Date.now() - startTime,
         ipAddress: fastifyRequest.ip,
       },
@@ -427,7 +428,7 @@ async function handleToolsCall(
         correlationId,
         toolName,
         serverName: serverInfo.name,
-        arguments: sanitizeArgs(toolArgs),
+        arguments: sanitizeArgs(toolArgs) as any,
         status: 'BLOCKED',
         errorMessage: `Security threat detected: ${threatResult.threats.map(t => t.type).join(', ')}`,
         metadata: {
@@ -437,7 +438,7 @@ async function handleToolsCall(
             severity: t.severity,
             description: t.description,
           })),
-        },
+        } as any,
         durationMs: Date.now() - startTime,
         ipAddress: fastifyRequest.ip,
       },
@@ -465,7 +466,7 @@ async function handleToolsCall(
         correlationId,
         toolName,
         serverName: serverInfo.name,
-        arguments: sanitizeArgs(toolArgs),
+        arguments: sanitizeArgs(toolArgs) as any,
         status: 'BLOCKED',
         errorMessage: 'Tool is classified as dangerous',
         durationMs: Date.now() - startTime,
@@ -503,10 +504,10 @@ async function handleToolsCall(
         correlationId,
         toolName,
         serverName: serverInfo.name,
-        arguments: sanitizeArgs(toolArgs),
+        arguments: sanitizeArgs(toolArgs) as any,
         status: 'BLOCKED',
         errorMessage: policyResult.reason,
-        metadata: { policyName: policyResult.policyName },
+        metadata: { policyName: policyResult.policyName } as any,
         durationMs: Date.now() - startTime,
       },
     });
@@ -591,10 +592,10 @@ async function handleToolsCall(
       correlationId,
       toolName,
       serverName: serverInfo.name,
-      arguments: sanitizeArgs(toolArgs),
+      arguments: sanitizeArgs(toolArgs) as any,
       status: responseThreats.requiresReview ? 'FLAGGED' : 'SUCCESS',
       durationMs: Date.now() - startTime,
-      metadata: Object.keys(auditMetadata).length > 0 ? auditMetadata : undefined,
+      metadata: Object.keys(auditMetadata).length > 0 ? auditMetadata as any : undefined,
       ipAddress: fastifyRequest.ip,
       userAgent: fastifyRequest.headers['user-agent'],
     },

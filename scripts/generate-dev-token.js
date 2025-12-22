@@ -26,7 +26,13 @@ for (let i = 0; i < args.length; i++) {
 }
 
 // In dev mode, the services use a simple symmetric key
-const DEV_JWT_SECRET = process.env.DEV_JWT_SECRET || 'mcp-manager-dev-secret-change-in-production';
+const DEV_JWT_SECRET = process.env.JWT_SECRET || process.env.DEV_JWT_SECRET;
+
+if (!DEV_JWT_SECRET) {
+  console.error('Error: JWT_SECRET or DEV_JWT_SECRET environment variable is required');
+  console.error('Set it with: export JWT_SECRET="your-secret-here"');
+  process.exit(1);
+}
 
 function base64url(input) {
   return Buffer.from(input)

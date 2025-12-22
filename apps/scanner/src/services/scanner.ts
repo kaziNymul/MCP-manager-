@@ -225,7 +225,7 @@ export class Scanner {
         throw new Error(`HTTP ${response.status}: ${response.statusText}`);
       }
 
-      const data = await response.json();
+      const data = await response.json() as { error?: { message?: string }; result: unknown };
 
       if (data.error) {
         throw new Error(data.error.message || 'MCP error');

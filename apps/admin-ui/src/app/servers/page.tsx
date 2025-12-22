@@ -2,17 +2,7 @@
 
 import { useState } from 'react';
 import useSWR, { mutate } from 'swr';
-
-const CONTROL_PLANE_URL = process.env.CONTROL_PLANE_URL || 'http://localhost:3001';
-const DEV_TOKEN = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJhdXRoMHxhZG1pbjEyMyIsImlzcyI6Im1jcC1tYW5hZ2VyLWRldiIsImF1ZCI6Im1jcC1tYW5hZ2VyIiwiaWF0IjoxNzAzMTU0MDAwfQ.placeholder';
-
-const fetcher = async (url: string) => {
-  const res = await fetch(url, {
-    headers: { 'Authorization': `Bearer ${DEV_TOKEN}` },
-  });
-  if (!res.ok) throw new Error('Failed to fetch');
-  return res.json();
-};
+import { fetcher, CONTROL_PLANE_URL, getAuthHeaders } from '@/lib/auth';
 
 export default function ServersPage() {
   const [showRegisterModal, setShowRegisterModal] = useState(false);
@@ -28,7 +18,7 @@ export default function ServersPage() {
     try {
       await fetch(`${CONTROL_PLANE_URL}/api/servers/${serverId}/versions/${versionId}/approve`, {
         method: 'POST',
-        headers: { 'Authorization': `Bearer ${DEV_TOKEN}` },
+        headers: getAuthHeaders(),
       });
       mutate(`${CONTROL_PLANE_URL}/api/servers`);
       setSelectedVersion(null);
@@ -44,7 +34,7 @@ export default function ServersPage() {
       await fetch(`${CONTROL_PLANE_URL}/api/servers/${serverId}/versions/${versionId}/reject`, {
         method: 'POST',
         headers: {
-          'Authorization': `Bearer ${DEV_TOKEN}`,
+          ...getAuthHeaders(),
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({ reason }),
@@ -63,7 +53,7 @@ export default function ServersPage() {
       await fetch(`${CONTROL_PLANE_URL}/api/servers/${serverId}/versions/${versionId}/revoke`, {
         method: 'POST',
         headers: {
-          'Authorization': `Bearer ${DEV_TOKEN}`,
+          ...getAuthHeaders(),
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({ reason }),
@@ -225,7 +215,7 @@ function RegisterServerModal({ onClose, onSuccess }: { onClose: () => void; onSu
       const res = await fetch(`${CONTROL_PLANE_URL}/api/servers`, {
         method: 'POST',
         headers: {
-          'Authorization': `Bearer ${DEV_TOKEN}`,
+          ...getAuthHeaders(),
           'Content-Type': 'application/json',
         },
         body: JSON.stringify(formData),
@@ -418,18 +408,6 @@ function RegisterServerModal({ onClose, onSuccess }: { onClose: () => void; onSu
                   )}
                 </>
               )}
-            </div>
-            </div>
-            <div className="form-group">
-              <label className="form-label">Version</label>
-              <input
-                type="text"
-                className="form-input"
-                placeholder="1.0.0"
-                value={formData.version}
-                onChange={(e) => setFormData({ ...formData, version: e.target.value })}
-                required
-              />
             </div>
           </div>
           <div className="modal-footer">

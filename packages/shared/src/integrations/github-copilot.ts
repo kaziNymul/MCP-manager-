@@ -160,7 +160,7 @@ export class GitHubCopilotMcpManager {
         throw new Error(`GitHub API error: ${response.status} ${response.statusText}`);
       }
 
-      const data = await response.json();
+      const data = await response.json() as { servers?: GitHubMcpServerEntry[] };
       return data.servers || [];
     } catch (error) {
       logger.error({ error, url, scope: this.getScopeId() }, 'Failed to fetch GitHub Copilot MCP servers');
