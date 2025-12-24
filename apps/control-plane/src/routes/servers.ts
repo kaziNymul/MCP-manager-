@@ -13,6 +13,18 @@ import {
 // GitHub Copilot integration (optional)
 const githubCopilot = createGitHubCopilotManager();
 
+// Gateway URL for traffic inspection - all approved servers route through gateway
+const GATEWAY_URL = process.env.GATEWAY_URL || 'http://localhost:3003';
+
+/**
+ * Build the Gateway URL for a server
+ * This ensures all traffic flows through the Gateway for inspection
+ */
+function buildGatewayUrl(orgSlug: string, serverName: string): string {
+  const serverSlug = serverName.includes('/') ? serverName.split('/')[1] : serverName;
+  return `${GATEWAY_URL}/mcp/${orgSlug}/${serverSlug}`;
+}
+
 export async function serverRoutes(fastify: FastifyInstance) {
   // List servers for user's org
   fastify.get('/', {
@@ -365,6 +377,7 @@ export async function serverRoutes(fastify: FastifyInstance) {
 
     const server = await prisma.server.findFirst({
       where: { id, orgId: user.orgId },
+      include: { org: true },
     });
 
     if (!server) {
@@ -407,16 +420,18 @@ export async function serverRoutes(fastify: FastifyInstance) {
       });
 
       // Sync to GitHub Copilot Enterprise (if configured)
+      // CRITICAL: Use Gateway URL so all traffic is inspected
       if (githubCopilot) {
         try {
+          const gatewayUrl = buildGatewayUrl(server.org.slug, server.name);
           await githubCopilot.addServer({
             name: server.name.replace('/', '-'),
             displayName: server.displayName,
             description: server.description || undefined,
-            url: version.endpoint || server.endpoint,
+            url: gatewayUrl,
             enabled: true,
           });
-          request.log.info({ server: server.name }, 'Synced to GitHub Copilot');
+          request.log.info({ server: server.name, gatewayUrl }, 'Synced to GitHub Copilot via Gateway');
         } catch (err) {
           request.log.error({ err, server: server.name }, 'Failed to sync to GitHub Copilot');
           // Don't fail the approval, just log the error
