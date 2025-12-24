@@ -2,12 +2,24 @@ import { FastifyInstance } from 'fastify';
 import { prisma } from '@mcp-manager/prisma';
 
 /**
- * Registry Service Routes
+ * MCP Registry Service Routes
+ * 
+ * Implements the MCP Registry v0.1 Specification for GitHub Copilot integration.
+ * 
+ * Reference:
+ * - GitHub Docs: https://docs.github.com/en/copilot/how-tos/administer-copilot/manage-mcp-usage/configure-mcp-registry
+ * - MCP Registry Spec: https://registry.modelcontextprotocol.io/docs
+ * - MCP Registry Repo: https://github.com/modelcontextprotocol/registry
+ * 
+ * Required Endpoints (v0.1 specification):
+ * - GET /v0.1/servers - List all MCP servers
+ * - GET /v0.1/servers/{serverName}/versions/latest - Get latest version of a server
+ * - GET /v0.1/servers/{serverName}/versions/{version} - Get specific version details
  * 
  * IMPORTANT: This is a DISCOVERY-TIME service, NOT a runtime service.
  * 
- * Clients (like GitHub Copilot) query this registry to discover which MCP servers
- * are approved and available. The registry returns:
+ * Clients (GitHub Copilot, VS Code, etc.) query this registry to discover which MCP
+ * servers are approved and available. The registry returns:
  * - Server name (canonical identifier)
  * - Version
  * - Endpoint (pointing to the GATEWAY, not the origin server)
@@ -100,7 +112,8 @@ export async function registryRoutes(fastify: FastifyInstance) {
       prisma.server.count({ where }),
     ]);
 
-    // Transform to registry format
+    // Transform to MCP Registry v0.1 specification format
+    // Reference: https://github.com/modelcontextprotocol/registry
     const registryServers = servers
       .filter((s) => s.versions.length > 0)
       .map((server) => {
@@ -108,42 +121,58 @@ export async function registryRoutes(fastify: FastifyInstance) {
         
         // CRITICAL: Endpoint points to the GATEWAY, not the origin server
         // The gateway URL includes the server name for routing
-        const gatewayEndpoint = `${fastify.gatewayUrl}/mcp/${server.org.slug}/${server.name.split('/')[1]}`;
+        const serverSlug = server.name.includes('/') ? server.name.split('/')[1] : server.name;
+        const gatewayEndpoint = `${fastify.gatewayUrl}/mcp/${server.org.slug}/${serverSlug}`;
 
+        // MCP Registry v0.1 Server Response Format
         return {
-          // Canonical server identifier
-          name: server.name,
+          // Server ID (canonical identifier in format org/server-name)
+          id: server.name,
           
-          // Version info
-          version: latestVersion.version,
+          // Display name shown to users
+          name: server.displayName || server.name,
           
-          // Display info
-          displayName: server.displayName,
-          description: server.description,
+          // Server description
+          description: server.description || '',
           
-          // GATEWAY endpoint - all traffic goes through gateway
-          endpoint: gatewayEndpoint,
+          // Repository URL (for MCP Registry specification)
+          repository: {
+            url: server.repository || `https://github.com/${server.name}`,
+            source: 'github',
+          },
           
-          // Transport type
-          transport: server.transport.toLowerCase().replace('_', '-'),
+          // Version information
+          version_detail: {
+            version: latestVersion.version,
+            release_date: latestVersion.approvedAt?.toISOString() || new Date().toISOString(),
+            is_latest: true,
+          },
           
-          // Aggregated capabilities from tools
-          capabilities: [
-            ...new Set(
-              latestVersion.toolSchemas.flatMap((t) => t.capabilities)
-            ),
-          ],
+          // Transport configuration - THIS IS THE KEY PART
+          // Points to the GATEWAY endpoint, not the origin server
+          remotes: [{
+            transport_type: server.transport.toLowerCase().replace('_', '-') as 'stdio' | 'sse' | 'streamable-http',
+            url: gatewayEndpoint,
+          }],
           
-          // Tool metadata (not full schemas - those come from tools/list at runtime)
+          // Tool metadata (tools will be fully discovered via tools/list at runtime)
           tools: latestVersion.toolSchemas.map((t) => ({
             name: t.name,
-            description: t.description,
+            description: t.description || '',
           })),
           
-          // Metadata
-          homepage: server.homepage,
-          repository: server.repository,
-          tags: server.tags,
+          // Additional metadata
+          packages: server.repository ? [{
+            registry_name: 'npm',
+            name: server.name.split('/')[1] || server.name,
+            version: latestVersion.version,
+          }] : [],
+          
+          // Tags/categories
+          categories: server.tags || [],
+          
+          // Links
+          homepage: server.homepage || undefined,
         };
       });
 
@@ -209,28 +238,53 @@ export async function registryRoutes(fastify: FastifyInstance) {
     }
 
     const version = server.versions[0]!;
-    const gatewayEndpoint = `${fastify.gatewayUrl}/mcp/${server.org.slug}/${server.name.split('/')[1]}`;
+    const serverSlug = server.name.includes('/') ? server.name.split('/')[1] : server.name;
+    const gatewayEndpoint = `${fastify.gatewayUrl}/mcp/${server.org.slug}/${serverSlug}`;
 
     reply.header('Cache-Control', 'public, max-age=60');
 
+    // MCP Registry v0.1 Server Version Response Format
     return {
-      name: server.name,
-      version: version.version,
-      displayName: server.displayName,
-      description: server.description,
-      endpoint: gatewayEndpoint,
-      transport: server.transport.toLowerCase().replace('_', '-'),
-      capabilities: [...new Set(version.toolSchemas.flatMap((t) => t.capabilities))],
+      // Server ID
+      id: server.name,
+      
+      // Display name
+      name: server.displayName || server.name,
+      
+      // Description
+      description: server.description || '',
+      
+      // Repository info
+      repository: {
+        url: server.repository || `https://github.com/${server.name}`,
+        source: 'github',
+      },
+      
+      // Version information
+      version_detail: {
+        version: version.version,
+        release_date: version.approvedAt?.toISOString() || new Date().toISOString(),
+        is_latest: true,
+      },
+      
+      // Transport - points to Gateway
+      remotes: [{
+        transport_type: server.transport.toLowerCase().replace('_', '-') as 'stdio' | 'sse' | 'streamable-http',
+        url: gatewayEndpoint,
+      }],
+      
+      // Full tool schemas for this version
       tools: version.toolSchemas.map((t) => ({
         name: t.name,
-        displayName: t.displayName,
-        description: t.description,
+        description: t.description || '',
         inputSchema: t.inputSchema,
-        capabilities: t.capabilities,
-        isDangerous: t.isDangerous,
       })),
-      riskLevel: version.riskLevel,
-      approvedAt: version.approvedAt,
+      
+      // Risk assessment (MCP Manager extension)
+      risk_assessment: {
+        level: version.riskLevel || 'UNKNOWN',
+        approved_at: version.approvedAt?.toISOString(),
+      },
     };
   });
 
@@ -282,28 +336,53 @@ export async function registryRoutes(fastify: FastifyInstance) {
     }
 
     const version = server.versions[0]!;
-    const gatewayEndpoint = `${fastify.gatewayUrl}/mcp/${server.org.slug}/${server.name.split('/')[1]}`;
+    const serverSlug = server.name.includes('/') ? server.name.split('/')[1] : server.name;
+    const gatewayEndpoint = `${fastify.gatewayUrl}/mcp/${server.org.slug}/${serverSlug}`;
 
     reply.header('Cache-Control', 'public, max-age=300');
 
+    // MCP Registry v0.1 Server Version Response Format
     return {
-      name: server.name,
-      version: version.version,
-      displayName: server.displayName,
-      description: server.description,
-      endpoint: gatewayEndpoint,
-      transport: server.transport.toLowerCase().replace('_', '-'),
-      capabilities: [...new Set(version.toolSchemas.flatMap((t) => t.capabilities))],
+      // Server ID
+      id: server.name,
+      
+      // Display name
+      name: server.displayName || server.name,
+      
+      // Description
+      description: server.description || '',
+      
+      // Repository info
+      repository: {
+        url: server.repository || `https://github.com/${server.name}`,
+        source: 'github',
+      },
+      
+      // Version information
+      version_detail: {
+        version: version.version,
+        release_date: version.approvedAt?.toISOString() || new Date().toISOString(),
+        is_latest: false, // Specific version, may not be latest
+      },
+      
+      // Transport - points to Gateway
+      remotes: [{
+        transport_type: server.transport.toLowerCase().replace('_', '-') as 'stdio' | 'sse' | 'streamable-http',
+        url: gatewayEndpoint,
+      }],
+      
+      // Full tool schemas for this version
       tools: version.toolSchemas.map((t) => ({
         name: t.name,
-        displayName: t.displayName,
-        description: t.description,
+        description: t.description || '',
         inputSchema: t.inputSchema,
-        capabilities: t.capabilities,
-        isDangerous: t.isDangerous,
       })),
-      riskLevel: version.riskLevel,
-      approvedAt: version.approvedAt,
+      
+      // Risk assessment (MCP Manager extension)
+      risk_assessment: {
+        level: version.riskLevel || 'UNKNOWN',
+        approved_at: version.approvedAt?.toISOString(),
+      },
     };
   });
 

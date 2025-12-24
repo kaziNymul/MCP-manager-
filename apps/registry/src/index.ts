@@ -26,12 +26,23 @@ async function main() {
     requestIdLogLabel: 'requestId',
   });
 
-  // CORS is important for registry - clients may query from various origins
+  // CORS is CRITICAL for MCP Registry - GitHub Copilot and other clients need to access from various origins
+  // See: https://docs.github.com/en/copilot/how-tos/administer-copilot/manage-mcp-usage/configure-mcp-registry
   await fastify.register(cors, {
-    origin: true,
+    origin: '*', // Allow all origins for registry discovery
     methods: ['GET', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'X-Organization-Id'],
-    credentials: true,
+    allowedHeaders: ['Authorization', 'Content-Type', 'X-Organization-Id'],
+    credentials: false, // Set to false when using wildcard origin
+  });
+
+  // Add explicit CORS headers for all /v0.1/servers routes
+  fastify.addHook('onSend', async (request, reply, payload) => {
+    if (request.url.startsWith('/v0.1/servers')) {
+      reply.header('Access-Control-Allow-Origin', '*');
+      reply.header('Access-Control-Allow-Methods', 'GET, OPTIONS');
+      reply.header('Access-Control-Allow-Headers', 'Authorization, Content-Type');
+    }
+    return payload;
   });
 
   await fastify.register(helmet, {
