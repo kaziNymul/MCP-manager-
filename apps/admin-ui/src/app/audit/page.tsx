@@ -19,7 +19,7 @@ export default function AuditPage() {
   const [filters, setFilters] = useState({
     eventType: '',
     status: '',
-    serverId: '',
+    serverName: '',
     startDate: '',
     endDate: '',
     limit: 50,
@@ -28,7 +28,7 @@ export default function AuditPage() {
   const queryParams = new URLSearchParams();
   if (filters.eventType) queryParams.set('eventType', filters.eventType);
   if (filters.status) queryParams.set('status', filters.status);
-  if (filters.serverId) queryParams.set('serverId', filters.serverId);
+  if (filters.serverName) queryParams.set('serverName', filters.serverName);
   if (filters.startDate) queryParams.set('startDate', filters.startDate);
   if (filters.endDate) queryParams.set('endDate', filters.endDate);
   queryParams.set('limit', String(filters.limit));
@@ -85,12 +85,12 @@ export default function AuditPage() {
             <label className="form-label">Server</label>
             <select
               className="form-select"
-              value={filters.serverId}
-              onChange={(e) => setFilters({ ...filters, serverId: e.target.value })}
+              value={filters.serverName}
+              onChange={(e) => setFilters({ ...filters, serverName: e.target.value })}
             >
               <option value="">All Servers</option>
               {servers.map((server: any) => (
-                <option key={server.id} value={server.id}>{server.displayName}</option>
+                <option key={server.id} value={server.name}>{server.displayName}</option>
               ))}
             </select>
           </div>

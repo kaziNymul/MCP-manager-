@@ -53,7 +53,7 @@ function createDevToken(payload) {
     ...payload,
     iat: now,
     exp: now + 86400 * 365, // 1 year for dev tokens
-    iss: 'mcp-manager-dev',
+    iss: 'mcp-manager', // Must match JWT_ISSUER in auth plugin
     aud: 'mcp-manager',
   };
 
