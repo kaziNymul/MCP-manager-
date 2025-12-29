@@ -5,6 +5,7 @@
 export * from './threat-detector.js';
 export * from './anomaly-detector.js';
 export * from './vulnerability-scanner.js';
+export * from './mcp-threat-detector.js';
 export { SourceCodeScanner, getRepositoryAccessInfo, createSourceCodeScanner } from './source-code-scanner.js';
 export type { 
   RepositoryProvider, 
