@@ -159,6 +159,9 @@ model Server {
   orgId        String
   org          Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
   
+  // User who created/registered this server (for permission checks)
+  createdBy    String?
+  
   // Endpoint (where the actual MCP server lives)
   endpoint     String
   

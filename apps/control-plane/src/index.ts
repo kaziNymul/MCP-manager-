@@ -2,6 +2,7 @@ import 'dotenv/config';
 import Fastify from 'fastify';
 import cors from '@fastify/cors';
 import helmet from '@fastify/helmet';
+import cookie from '@fastify/cookie';
 import { createLogger } from '@mcp-manager/shared';
 import { prisma } from '@mcp-manager/prisma';
 import { authPlugin } from './plugins/auth.js';
@@ -11,6 +12,7 @@ import { teamRoutes } from './routes/teams.js';
 import { serverRoutes } from './routes/servers.js';
 import { policyRoutes } from './routes/policies.js';
 import { auditRoutes } from './routes/audit.js';
+import { authRoutes } from './routes/auth.js';
 import { healthRoutes } from './routes/health.js';
 
 const logger = createLogger('control-plane');
@@ -41,6 +43,11 @@ async function main() {
     contentSecurityPolicy: false,
   });
 
+  // Cookie support for OAuth state
+  await fastify.register(cookie, {
+    secret: process.env.COOKIE_SECRET || process.env.JWT_SECRET,
+  });
+
   // Custom error handler
   fastify.setErrorHandler(errorHandler);
 
@@ -49,6 +56,7 @@ async function main() {
 
   // Routes
   await fastify.register(healthRoutes, { prefix: '/health' });
+  await fastify.register(authRoutes, { prefix: '/api/auth' });
   await fastify.register(orgRoutes, { prefix: '/api/orgs' });
   await fastify.register(teamRoutes, { prefix: '/api/teams' });
   await fastify.register(serverRoutes, { prefix: '/api/servers' });

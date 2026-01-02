@@ -2,6 +2,7 @@
 
 import useSWR from 'swr';
 import { fetcher, CONTROL_PLANE_URL } from '@/lib/auth';
+import AuthGuard from '@/components/AuthGuard';
 
 export default function DashboardPage() {
   const { data: orgsData } = useSWR(`${CONTROL_PLANE_URL}/api/orgs`, fetcher);
@@ -21,13 +22,14 @@ export default function DashboardPage() {
   ).length;
 
   return (
-    <div className="container page">
-      <h1 className="mb-4">Dashboard</h1>
+    <AuthGuard>
+      <div className="container page">
+        <h1 className="mb-4">Dashboard</h1>
 
-      {/* Stats Grid */}
-      <div className="stats-grid">
-        <div className="stat-card">
-          <div className="stat-value">{servers.length}</div>
+        {/* Stats Grid */}
+        <div className="stats-grid">
+          <div className="stat-card">
+            <div className="stat-value">{servers.length}</div>
           <div className="stat-label">Total Servers</div>
         </div>
         <div className="stat-card">
@@ -157,6 +159,7 @@ export default function DashboardPage() {
         </div>
       </div>
     </div>
+    </AuthGuard>
   );
 }
 

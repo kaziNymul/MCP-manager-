@@ -69,6 +69,92 @@ export function getAuthHeaders(): HeadersInit {
 }
 
 /**
+ * User info from token
+ */
+export interface UserInfo {
+  userId: string;
+  email: string;
+  name?: string;
+  orgId: string;
+  orgSlug: string;
+  role: string;
+  isAdmin: boolean;
+  permissions: string[];
+  adGroups: string[];
+}
+
+/**
+ * Decode JWT token to get user info (client-side only)
+ */
+export function getUserFromToken(): UserInfo | null {
+  const token = getAuthToken();
+  if (!token) return null;
+
+  try {
+    const parts = token.split('.');
+    if (parts.length !== 3) return null;
+    
+    const payload = JSON.parse(atob(parts[1]));
+    return {
+      userId: payload.userId || payload.sub,
+      email: payload.email,
+      name: payload.name,
+      orgId: payload.orgId,
+      orgSlug: payload.orgSlug,
+      role: payload.role,
+      isAdmin: payload.isAdmin || false,
+      permissions: payload.permissions || [],
+      adGroups: payload.groups || [],
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Check if current user has a specific permission
+ */
+export function hasPermission(permission: string): boolean {
+  const user = getUserFromToken();
+  if (!user) return false;
+  if (user.isAdmin) return true;
+  return user.permissions.includes(permission) || user.permissions.includes('*');
+}
+
+/**
+ * Logout - clear token and optionally redirect to Azure AD logout
+ */
+export async function logout(): Promise<void> {
+  const token = getAuthToken();
+  clearAuthToken();
+  
+  if (token) {
+    try {
+      const response = await fetch(`${CONTROL_PLANE_URL}/api/auth/logout`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+      });
+      
+      const data = await response.json();
+      
+      // If Azure AD logout URL is returned, redirect to it
+      if (data.logoutUrl) {
+        window.location.href = data.logoutUrl;
+        return;
+      }
+    } catch (err) {
+      console.error('Logout error:', err);
+    }
+  }
+  
+  // Redirect to login page
+  window.location.href = '/login';
+}
+
+/**
  * Authenticated fetch wrapper
  */
 export async function authFetch(url: string, options: RequestInit = {}): Promise<Response> {
@@ -78,13 +164,23 @@ export async function authFetch(url: string, options: RequestInit = {}): Promise
     throw new Error('Authentication required. Please set NEXT_PUBLIC_AUTH_TOKEN or login.');
   }
   
-  return fetch(url, {
+  const response = await fetch(url, {
     ...options,
     headers: {
       ...getAuthHeaders(),
       ...options.headers,
     },
   });
+  
+  // If unauthorized, redirect to login
+  if (response.status === 401) {
+    clearAuthToken();
+    if (typeof window !== 'undefined') {
+      window.location.href = '/login';
+    }
+  }
+  
+  return response;
 }
 
 /**

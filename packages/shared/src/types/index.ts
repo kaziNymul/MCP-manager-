@@ -14,6 +14,10 @@ export interface UserContext {
     teamName: string;
     role: 'LEAD' | 'MEMBER' | 'VIEWER';
   }>;
+  // AD group-based permissions
+  adGroups?: string[];
+  isAdmin?: boolean;  // true if in admin AD group
+  permissions?: string[];  // derived permissions from AD groups
 }
 
 // Service context for internal service-to-service calls

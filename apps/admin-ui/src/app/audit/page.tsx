@@ -135,7 +135,7 @@ export default function AuditPage() {
               onClick={() => setFilters({
                 eventType: '',
                 status: '',
-                serverId: '',
+                serverName: '',
                 startDate: '',
                 endDate: '',
                 limit: 50,

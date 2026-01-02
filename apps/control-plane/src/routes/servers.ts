@@ -8,6 +8,7 @@ import {
   NotFoundError,
   AUDIT_EVENT_TYPES,
   createGitHubCopilotManager,
+  AuthorizationError,
 } from '@mcp-manager/shared';
 
 // GitHub Copilot integration (optional)
@@ -23,6 +24,43 @@ const GATEWAY_URL = process.env.GATEWAY_URL || 'http://localhost:3003';
 function buildGatewayUrl(orgSlug: string, serverName: string): string {
   const serverSlug = serverName.includes('/') ? serverName.split('/')[1] : serverName;
   return `${GATEWAY_URL}/mcp/${orgSlug}/${serverSlug}`;
+}
+
+/**
+ * Helper to check if user has a specific permission
+ */
+function hasPermission(user: any, permission: string): boolean {
+  const perms = user?.permissions || [];
+  return perms.includes(permission) || perms.includes('*') || user?.isAdmin === true;
+}
+
+/**
+ * Helper to check if user can write to a specific server
+ * Admins can write to any server, users can only write to their own
+ */
+async function canWriteServer(user: any, serverId: string): Promise<boolean> {
+  // Admins can write to any server
+  if (user.isAdmin || hasPermission(user, 'servers:admin')) {
+    return true;
+  }
+
+  // Check if user has write permission at all
+  if (!hasPermission(user, 'servers:write')) {
+    return false;
+  }
+
+  // For regular users with servers:write, they can only modify servers they created
+  const server = await prisma.server.findUnique({
+    where: { id: serverId },
+    select: { createdBy: true, orgId: true },
+  });
+
+  if (!server || server.orgId !== user.orgId) {
+    return false;
+  }
+
+  // Check if user created this server
+  return server.createdBy === user.userId;
 }
 
 export async function serverRoutes(fastify: FastifyInstance) {
@@ -128,9 +166,9 @@ export async function serverRoutes(fastify: FastifyInstance) {
     const user = request.user!;
     const data = createServerSchema.parse(request.body);
 
-    // Check permission
-    if (user.role !== 'OWNER' && user.role !== 'ADMIN') {
-      return reply.status(403).send({ error: 'Insufficient permissions to register server' });
+    // Check permission - admins and users with servers:write can register
+    if (!hasPermission(user, 'servers:write')) {
+      throw new AuthorizationError('You do not have permission to register servers');
     }
 
     const server = await prisma.server.create({
@@ -147,6 +185,7 @@ export async function serverRoutes(fastify: FastifyInstance) {
         tags: data.tags || [],
         orgId: user.orgId,
         status: 'PENDING',
+        createdBy: user.userId, // Track who created the server
       },
     });
 
@@ -194,8 +233,9 @@ export async function serverRoutes(fastify: FastifyInstance) {
       throw new NotFoundError('Server', id);
     }
 
-    if (user.role !== 'OWNER' && user.role !== 'ADMIN') {
-      return reply.status(403).send({ error: 'Insufficient permissions' });
+    // Check write permission for this specific server
+    if (!(await canWriteServer(user, id))) {
+      throw new AuthorizationError('You do not have permission to update this server');
     }
 
     const server = await prisma.server.update({
@@ -231,8 +271,9 @@ export async function serverRoutes(fastify: FastifyInstance) {
       throw new NotFoundError('Server', id);
     }
 
-    if (user.role !== 'OWNER' && user.role !== 'ADMIN') {
-      return reply.status(403).send({ error: 'Insufficient permissions' });
+    // Only admins or server creators can delete
+    if (!(await canWriteServer(user, id))) {
+      throw new AuthorizationError('You do not have permission to delete this server');
     }
 
     await prisma.server.delete({ where: { id } });
@@ -370,9 +411,9 @@ export async function serverRoutes(fastify: FastifyInstance) {
     const user = request.user!;
     const data = approveVersionSchema.parse(request.body);
 
-    // Only admins can approve
-    if (user.role !== 'OWNER' && user.role !== 'ADMIN') {
-      return reply.status(403).send({ error: 'Only admins can approve servers' });
+    // Only admins can approve servers (requires servers:approve permission)
+    if (!hasPermission(user, 'servers:approve')) {
+      throw new AuthorizationError('You do not have permission to approve servers. This requires admin access.');
     }
 
     const server = await prisma.server.findFirst({
