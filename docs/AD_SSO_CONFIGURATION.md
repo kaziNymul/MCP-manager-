@@ -1,14 +1,14 @@
-# Azure AD SSO Configuration Guide
+# Active Directory SSO Configuration Guide
 
-This guide explains how to configure Azure Active Directory (AD) Single Sign-On (SSO) for MCP Manager. Users log in with their corporate credentials (username/password), and their access level is determined by AD group membership.
+This guide explains how to configure Active Directory (AD) Single Sign-On for MCP Manager. Users log in directly with their corporate username and password - no redirect to external pages.
 
 ## Overview
 
-MCP Manager supports enterprise SSO authentication via Azure AD (or other OIDC-compatible providers like Okta, AWS Cognito). When users log in:
+MCP Manager authenticates users directly against your Active Directory via LDAP. When users log in:
 
-1. They click "Sign in with Microsoft" on the login page
-2. They're redirected to Microsoft's login page to enter their corporate credentials
-3. After successful authentication, Azure AD returns user info + group memberships
+1. They enter their corporate username and password on the MCP Manager login page
+2. MCP Manager validates credentials against your AD Domain Controller via LDAP
+3. AD returns user info + group memberships
 4. MCP Manager grants permissions based on AD group membership
 
 | AD Group | Role | Permissions |
@@ -17,142 +17,169 @@ MCP Manager supports enterprise SSO authentication via Azure AD (or other OIDC-c
 | `consec-example-users` | MEMBER | Register/manage their own servers, view policies |
 | (No group) | VIEWER | Read-only access |
 
+## Login Flow
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    MCP Manager Login Page                        │
+│  ┌─────────────────────────────────────────────────────────┐    │
+│  │  Username: [john.doe________________]                    │    │
+│  │  Password: [************************]                    │    │
+│  │                                                          │    │
+│  │  [        Sign In with Corporate Credentials        ]   │    │
+│  └─────────────────────────────────────────────────────────┘    │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+              ┌───────────────────────────────┐
+              │   LDAP Bind (Authentication)   │
+              │   ldap://dc.example.com:389   │
+              └───────────────────────────────┘
+                              │
+                              ▼
+              ┌───────────────────────────────┐
+              │   Search for User Groups       │
+              │   (memberOf attribute)         │
+              └───────────────────────────────┘
+                              │
+                              ▼
+              ┌───────────────────────────────┐
+              │   Map Groups to Permissions    │
+              │   consec-example-admin → ADMIN │
+              └───────────────────────────────┘
+                              │
+                              ▼
+              ┌───────────────────────────────┐
+              │   Return JWT Token             │
+              │   User logged in!              │
+              └───────────────────────────────┘
+```
+
 ## Prerequisites
 
-1. Azure AD tenant with Global Administrator access
-2. MCP Manager deployed (or running locally for testing)
-3. SSL/TLS enabled for production deployments
+1. Active Directory Domain Controller accessible from MCP Manager
+2. LDAP port open (389 for LDAP, 636 for LDAPS)
+3. AD groups created for admin and user access
+4. Service account (optional, for advanced configurations)
 
 ---
 
-## Step 1: Register Application in Azure AD
+## Step 1: Create AD Security Groups
 
-### 1.1 Create App Registration
+### 1.1 Create Admin Group
 
-1. Go to **Azure Portal** → **Azure Active Directory** → **App registrations**
-2. Click **New registration**
-3. Configure:
-   - **Name**: `MCP Manager`
-   - **Supported account types**: Choose based on your org (typically "Single tenant")
-   - **Redirect URI**: 
-     - Type: `Web`
-     - URI: `https://your-domain.com/api/auth/callback` (or `http://localhost:3000/api/auth/callback` for local dev)
-4. Click **Register**
-
-### 1.2 Note Important Values
-
-After registration, note these values:
-
-```
-Application (client) ID: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
-Directory (tenant) ID: yyyyyyyy-yyyy-yyyy-yyyy-yyyyyyyyyyyy
-```
-
-### 1.3 Create Client Secret
-
-1. Go to **Certificates & secrets** → **Client secrets** → **New client secret**
-2. Add description: `MCP Manager Secret`
-3. Set expiration (recommend 24 months for production)
-4. **Copy the secret value immediately** - you won't see it again!
-
----
-
-## Step 2: Configure AD Groups
-
-### 2.1 Create Security Groups
-
-1. Go to **Azure AD** → **Groups** → **New group**
-2. Create admin group:
-   - **Group type**: Security
+1. Open **Active Directory Users and Computers**
+2. Navigate to your OU (e.g., `OU=Groups,DC=example,DC=com`)
+3. Right-click → **New** → **Group**
+4. Configure:
    - **Group name**: `consec-example-admin`
-   - **Description**: MCP Manager Administrators - Full access
-   - **Membership type**: Assigned
-3. Create user group:
-   - **Group type**: Security  
+   - **Group scope**: Global
+   - **Group type**: Security
+5. Click **OK**
+
+### 1.2 Create User Group
+
+1. Create another group:
    - **Group name**: `consec-example-users`
-   - **Description**: MCP Manager Users - Can register and manage own servers
-   - **Membership type**: Assigned
+   - **Group scope**: Global
+   - **Group type**: Security
 
-### 2.2 Assign Users to Groups
+### 1.3 Add Members
 
-1. Open each group → **Members** → **Add members**
+1. Open each group → **Members** tab → **Add**
 2. Add appropriate users to each group
 
-### 2.3 Enable Group Claims in Token
-
-1. Go to **App registrations** → **MCP Manager** → **Token configuration**
-2. Click **Add groups claim**
-3. Select:
-   - ✅ Security groups
-   - ✅ Groups assigned to the application (optional, for filtered groups)
-4. For **ID** token and **Access** token, select:
-   - **Emit groups as role claims**: `sAMAccountName` or `Group ID`
-5. Click **Add**
-
-### 2.4 (Optional) Assign Groups to App
-
-For large organizations, limit which groups can access the app:
-
-1. Go to **Enterprise applications** → **MCP Manager**
-2. Click **Users and groups** → **Add user/group**
-3. Add both `consec-example-admin` and `consec-example-users` groups
-
 ---
 
-## Step 3: Configure MCP Manager
+## Step 2: Configure MCP Manager
 
-### 3.1 Environment Variables
+### 2.1 Environment Variables
 
-Add these to your `.env` or Kubernetes secrets:
+Add these to your `.env` file or Kubernetes secrets:
 
 ```bash
-# Authentication Mode (set to 'oidc' for Azure AD)
-AUTH_MODE=oidc
+# Authentication Mode - set to 'ldap' for Active Directory
+AUTH_MODE=ldap
 
-# Azure AD OAuth Configuration
-AZURE_AD_TENANT_ID=your-tenant-id-here
-AZURE_AD_CLIENT_ID=your-client-id-here
-AZURE_AD_CLIENT_SECRET=your-client-secret-here
+# LDAP Server Configuration
+LDAP_URL=ldap://your-domain-controller.example.com:389
+# For secure LDAP (recommended in production):
+# LDAP_URL=ldaps://your-domain-controller.example.com:636
+# LDAP_USE_TLS=true
 
-# OAuth Redirect URI (must match what you configured in Azure AD)
-REDIRECT_URI=https://your-domain.com/api/auth/callback
+# Active Directory Domain
+AD_DOMAIN=EXAMPLE  # NetBIOS domain name (e.g., CONTOSO, CORP, EXAMPLE)
 
-# Frontend URL (for post-login redirect)
-FRONTEND_URL=https://your-domain.com
+# Base DN for user search
+LDAP_BASE_DN=DC=example,DC=com
 
-# JWT Configuration (for session tokens)
-JWT_SECRET=your-secure-random-string-here
+# User search filter (default works for most AD setups)
+LDAP_USER_SEARCH_FILTER=(sAMAccountName={{username}})
+
+# JWT Configuration
+JWT_SECRET=your-secure-random-string-minimum-32-characters
 JWT_ISSUER=mcp-manager
 JWT_AUDIENCE=mcp-manager
 
-# AD Group Configuration
+# AD Group Configuration (case-insensitive)
 AD_ADMIN_GROUPS=consec-example-admin
 AD_USER_GROUPS=consec-example-users
-AD_GROUPS_OVERRIDE=true
 
-# JIT Provisioning (creates users on first login)
+# Default organization for new users (JIT provisioning)
 DEFAULT_ORG_SLUG=default
 ```
 
-Replace:
-- `your-tenant-id-here` with your Azure AD tenant ID
-- `your-client-id-here` with your app registration's client ID
-- `your-client-secret-here` with the secret you created in Step 1.3
-- `your-domain.com` with your actual domain
+### 2.2 Username Formats Supported
 
-### 3.2 Multiple Admin/User Groups
+Users can log in using any of these formats:
+
+| Format | Example | Notes |
+|--------|---------|-------|
+| Plain username | `john.doe` | Domain prefix is added automatically |
+| DOMAIN\username | `EXAMPLE\john.doe` | Traditional Windows format |
+| UPN (email) | `john.doe@example.com` | User Principal Name |
+
+### 2.3 Multiple Admin/User Groups
 
 You can specify multiple groups (comma-separated):
 
 ```bash
 AD_ADMIN_GROUPS=global-admins,security-team,mcp-admins
-AD_USER_GROUPS=developers,engineering,devops
+AD_USER_GROUPS=developers,engineering,devops,contractors
 ```
 
-### 3.3 AD Groups Override Behavior
+---
 
-- `AD_GROUPS_OVERRIDE=true` - Roles from AD groups take precedence over database roles
-- `AD_GROUPS_OVERRIDE=false` - Database roles take precedence (AD groups still tracked)
+## Step 3: Network Configuration
+
+### 3.1 Firewall Rules
+
+Ensure MCP Manager can reach your Domain Controller:
+
+| Source | Destination | Port | Protocol | Description |
+|--------|-------------|------|----------|-------------|
+| MCP Manager | Domain Controller | 389 | TCP | LDAP |
+| MCP Manager | Domain Controller | 636 | TCP | LDAPS (secure) |
+| MCP Manager | Domain Controller | 3268 | TCP | Global Catalog |
+
+### 3.2 DNS Resolution
+
+MCP Manager must be able to resolve the Domain Controller hostname:
+
+```bash
+# Test from MCP Manager container/server
+nslookup your-domain-controller.example.com
+```
+
+### 3.3 Testing LDAP Connectivity
+
+```bash
+# Test LDAP connection (from MCP Manager server)
+ldapsearch -x -H ldap://your-domain-controller.example.com:389 \
+  -D "EXAMPLE\testuser" -W \
+  -b "DC=example,DC=com" \
+  "(sAMAccountName=testuser)"
+```
 
 ---
 
@@ -178,8 +205,6 @@ AD_USER_GROUPS=developers,engineering,devops
 | Policies | ❌ | ✅ | ❌ | ❌ | - |
 | Teams | ❌ | ✅ | ❌ | ❌ | - |
 | Audit Logs | - | ✅ | - | - | - |
-| Organizations | ❌ | ❌ | ❌ | ❌ | - |
-| Users | ❌ | ❌ | ❌ | ❌ | - |
 
 ### Viewer Permissions (No Group)
 
@@ -187,121 +212,91 @@ Read-only access to servers and policies only.
 
 ---
 
-## Step 5: Testing
+## Step 5: Just-In-Time (JIT) User Provisioning
 
-### 5.1 Get Test Token (Development)
+When a user logs in for the first time:
 
-For development/testing, generate a token with group claims:
+1. MCP Manager validates credentials against AD
+2. Retrieves user's AD groups (from `memberOf` attribute)
+3. Creates user record in database with:
+   - Email from AD (`mail` or `userPrincipalName`)
+   - Display name from AD (`displayName`)
+   - Role based on AD groups
+4. User can immediately access the system
 
-```javascript
-// scripts/generate-ad-token.js
-const jose = require('jose');
-
-async function generateTestToken() {
-  const secret = new TextEncoder().encode(process.env.JWT_SECRET);
-  
-  const token = await new jose.SignJWT({
-    sub: 'test-user-001',
-    email: 'admin@example.com',
-    name: 'Test Admin',
-    groups: ['consec-example-admin'], // Or ['consec-example-users']
-  })
-    .setProtectedHeader({ alg: 'HS256' })
-    .setIssuedAt()
-    .setIssuer('mcp-manager')
-    .setAudience('mcp-manager')
-    .setExpirationTime('1h')
-    .sign(secret);
-
-  console.log('Bearer', token);
-}
-
-generateTestToken();
-```
-
-### 5.2 Verify Authentication
-
-```bash
-# Test with admin token
-curl -H "Authorization: Bearer $ADMIN_TOKEN" \
-  http://localhost:3001/api/servers
-
-# Test server approval (admin only)
-curl -X POST \
-  -H "Authorization: Bearer $ADMIN_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"approved": true}' \
-  http://localhost:3001/api/servers/{id}/versions/{versionId}/approve
-
-# Test with user token (should fail for approval)
-curl -X POST \
-  -H "Authorization: Bearer $USER_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"approved": true}' \
-  http://localhost:3001/api/servers/{id}/versions/{versionId}/approve
-# Expected: 403 Forbidden
-```
-
----
-
-## Step 6: Just-In-Time User Provisioning
-
-When a user authenticates for the first time:
-
-1. MCP Manager validates the JWT token
-2. Extracts AD group membership from token claims
-3. If user doesn't exist in database:
-   - Creates new user with email and name from token
-   - Assigns role based on AD groups
-   - Associates with default organization
-4. User can immediately use the system
-
-This eliminates manual user provisioning.
+**No manual user creation required!**
 
 ---
 
 ## Troubleshooting
 
-### "User not found" after successful AD login
+### "Invalid username or password"
 
-Check that JIT provisioning is configured:
+1. **Verify credentials**: Test login with the same credentials in another AD-integrated app
+2. **Check domain prefix**: Try logging in as `DOMAIN\username`
+3. **Check LDAP URL**: Ensure the Domain Controller is reachable
+4. **Check logs**: Look at control-plane logs for detailed error messages
+
 ```bash
-DEFAULT_ORG_SLUG=your-org-slug
+docker logs mcp-manager-control-plane 2>&1 | grep -i ldap
 ```
 
-### Groups not appearing in token
+### "LDAP connection failed"
 
-1. Verify group claims are configured in **Token configuration**
-2. Check if groups are assigned to the app in **Enterprise applications**
-3. For large numbers of groups, Azure may return group IDs instead of names - configure group ID in `AD_ADMIN_GROUPS`
+1. **Check network**: Can you ping the Domain Controller?
+2. **Check port**: Is port 389 (or 636) open?
+3. **Check DNS**: Can you resolve the DC hostname?
+4. **Check TLS**: If using LDAPS, ensure certificates are valid
 
-### "Invalid issuer" error
+### "User authenticated but no groups found"
 
-Ensure `JWT_ISSUER` matches the issuer in your tokens:
-- Azure AD v2: `https://login.microsoftonline.com/{tenant-id}/v2.0`
-- Azure AD v1: `https://sts.windows.net/{tenant-id}/`
+This can happen if:
+1. User is not in any groups
+2. LDAP search permissions are restricted
+3. Group search base DN is incorrect
 
-### Permission denied for admin users
+Try setting `LDAP_BASE_DN` to a broader scope:
 
-1. Verify `AD_GROUPS_OVERRIDE=true` is set
-2. Check group name spelling in `AD_ADMIN_GROUPS`
-3. Verify user is actually in the admin group in Azure AD
+```bash
+LDAP_BASE_DN=DC=example,DC=com
+```
+
+### "Permission denied" for admin users
+
+1. Verify user is actually in the admin AD group
+2. Check `AD_ADMIN_GROUPS` spelling (case-insensitive)
+3. Ensure group name matches exactly (check for trailing spaces)
 
 ---
 
 ## Security Best Practices
 
-1. **Use Group IDs**: In production, use Azure AD Group Object IDs instead of display names (they're immutable)
+### 1. Use LDAPS (Secure LDAP)
 
-2. **Token Validation**: Always verify tokens with Azure AD's public keys (JWKS)
+```bash
+LDAP_URL=ldaps://your-domain-controller.example.com:636
+LDAP_USE_TLS=true
+```
 
-3. **Least Privilege**: Only assign users to `consec-example-admin` if they truly need admin access
+### 2. Least Privilege
 
-4. **Audit Logging**: Monitor audit logs for unusual admin activity
+Only add users to `consec-example-admin` if they truly need admin access.
 
-5. **Session Management**: Configure appropriate token lifetimes in Azure AD
+### 3. Strong JWT Secret
 
-6. **Conditional Access**: Use Azure AD Conditional Access policies for additional security
+Generate a secure random secret:
+
+```bash
+openssl rand -base64 32
+```
+
+### 4. Session Timeout
+
+Sessions expire after 8 hours by default. Users must re-authenticate with their AD credentials.
+
+### 5. Audit Logging
+
+All login attempts are logged with timestamps and IP addresses.
 
 ---
 
@@ -316,45 +311,40 @@ metadata:
   namespace: mcp-manager
 type: Opaque
 stringData:
-  AUTH_MODE: "oidc"
-  JWKS_URI: "https://login.microsoftonline.com/your-tenant-id/discovery/v2.0/keys"
-  JWT_ISSUER: "https://login.microsoftonline.com/your-tenant-id/v2.0"
-  JWT_AUDIENCE: "your-app-client-id"
-  AD_ADMIN_GROUPS: "12345678-1234-1234-1234-123456789abc"
-  AD_USER_GROUPS: "87654321-4321-4321-4321-cba987654321"
-  AD_GROUPS_OVERRIDE: "true"
-  DEFAULT_ORG_SLUG: "your-company"
+  AUTH_MODE: "ldap"
+  LDAP_URL: "ldaps://dc01.corp.example.com:636"
+  LDAP_USE_TLS: "true"
+  AD_DOMAIN: "CORP"
+  LDAP_BASE_DN: "DC=corp,DC=example,DC=com"
+  LDAP_USER_SEARCH_FILTER: "(sAMAccountName={{username}})"
+  AD_ADMIN_GROUPS: "MCP-Admins,Security-Team"
+  AD_USER_GROUPS: "MCP-Users,Developers,DevOps"
+  JWT_SECRET: "your-secure-random-string-here"
+  DEFAULT_ORG_SLUG: "corp"
 ```
 
 ---
 
-## Support for Other Identity Providers
+## Development Mode
 
-### Okta
+When `AUTH_MODE=development` (default), you can:
 
-```bash
-JWKS_URI=https://your-org.okta.com/oauth2/default/v1/keys
-JWT_ISSUER=https://your-org.okta.com/oauth2/default
-AD_ADMIN_GROUPS=mcp-admins
-AD_USER_GROUPS=mcp-users
-```
+1. **Use the login form** with any username (e.g., "admin" or "user")
+2. **Use quick login buttons** for Admin or User roles
+3. No actual AD connection is made
 
-Groups come from the `groups` claim (configure in Okta app settings).
+This allows development and testing without AD access.
 
-### AWS Cognito
+---
 
-```bash
-JWKS_URI=https://cognito-idp.{region}.amazonaws.com/{userPoolId}/.well-known/jwks.json
-JWT_ISSUER=https://cognito-idp.{region}.amazonaws.com/{userPoolId}
-```
+## Comparison: LDAP vs OAuth/OIDC
 
-Groups come from the `cognito:groups` claim.
+| Feature | LDAP (Current) | OAuth/OIDC |
+|---------|---------------|------------|
+| Login experience | Direct form on MCP Manager | Redirect to Microsoft/IdP |
+| Password handling | Sent to backend, then to AD | Never seen by app |
+| Network requirement | Direct access to DC | Internet access to IdP |
+| MFA support | Depends on AD config | Full support |
+| Setup complexity | Lower | Higher |
 
-### Keycloak
-
-```bash
-JWKS_URI=https://keycloak.example.com/realms/{realm}/protocol/openid-connect/certs
-JWT_ISSUER=https://keycloak.example.com/realms/{realm}
-```
-
-Groups/roles come from the `roles` or `groups` claim.
+MCP Manager uses **LDAP** for direct login without redirects, as requested.

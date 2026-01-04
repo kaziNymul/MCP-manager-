@@ -1,54 +1,180 @@
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import * as jose from 'jose';
+import ldap from 'ldapjs';
 import { prisma } from '@mcp-manager/prisma';
 import { createLogger } from '@mcp-manager/shared';
 
 const logger = createLogger('auth-routes');
 
-// Azure AD / OIDC Configuration
+// Authentication Mode: 'ldap' for direct AD login, 'development' for dev mode
 const AUTH_MODE = process.env.AUTH_MODE || 'development';
-const AZURE_AD_TENANT_ID = process.env.AZURE_AD_TENANT_ID;
-const AZURE_AD_CLIENT_ID = process.env.AZURE_AD_CLIENT_ID;
-const AZURE_AD_CLIENT_SECRET = process.env.AZURE_AD_CLIENT_SECRET;
-const REDIRECT_URI = process.env.REDIRECT_URI || 'http://localhost:3001/api/auth/callback';
-const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:3000';
+
+// LDAP / Active Directory Configuration
+const LDAP_URL = process.env.LDAP_URL || 'ldap://your-domain-controller.example.com:389';
+const LDAP_BASE_DN = process.env.LDAP_BASE_DN || 'DC=example,DC=com';
+const LDAP_USER_SEARCH_FILTER = process.env.LDAP_USER_SEARCH_FILTER || '(sAMAccountName={{username}})';
+const LDAP_USE_TLS = process.env.LDAP_USE_TLS === 'true';
+const AD_DOMAIN = process.env.AD_DOMAIN || 'EXAMPLE'; // NetBIOS domain name
+
+// JWT Configuration
 const JWT_SECRET = process.env.JWT_SECRET;
 const JWT_ISSUER = process.env.JWT_ISSUER || 'mcp-manager';
 const JWT_AUDIENCE = process.env.JWT_AUDIENCE || 'mcp-manager';
 
 // AD group configuration
-const AD_ADMIN_GROUPS = (process.env.AD_ADMIN_GROUPS || 'consec-example-admin').split(',').map(g => g.trim());
-const AD_USER_GROUPS = (process.env.AD_USER_GROUPS || 'consec-example-users').split(',').map(g => g.trim());
+const AD_ADMIN_GROUPS = (process.env.AD_ADMIN_GROUPS || 'consec-example-admin').split(',').map(g => g.trim().toLowerCase());
+const AD_USER_GROUPS = (process.env.AD_USER_GROUPS || 'consec-example-users').split(',').map(g => g.trim().toLowerCase());
 const DEFAULT_ORG_SLUG = process.env.DEFAULT_ORG_SLUG || 'default';
 
-// Azure AD endpoints
-function getAzureAdEndpoints() {
-  const base = `https://login.microsoftonline.com/${AZURE_AD_TENANT_ID}`;
-  return {
-    authorize: `${base}/oauth2/v2.0/authorize`,
-    token: `${base}/oauth2/v2.0/token`,
-    jwks: `${base}/discovery/v2.0/keys`,
-    userinfo: 'https://graph.microsoft.com/oidc/userinfo',
-  };
+// ============================================================================
+// LDAP AUTHENTICATION
+// ============================================================================
+
+interface LdapUser {
+  dn: string;
+  username: string;
+  email: string;
+  displayName: string;
+  groups: string[];
 }
 
 /**
- * Extract AD groups from token claims
+ * Authenticate user against Active Directory via LDAP
  */
-function extractAdGroups(claims: any): string[] {
-  const groups: string[] = [];
-  
-  if (Array.isArray(claims.groups)) {
-    groups.push(...claims.groups);
-  }
-  if (Array.isArray(claims.roles)) {
-    groups.push(...claims.roles);
-  }
-  if (Array.isArray(claims.wids)) {
-    groups.push(...claims.wids); // Directory roles
-  }
-  
-  return groups;
+async function authenticateWithLdap(username: string, password: string): Promise<LdapUser> {
+  return new Promise((resolve, reject) => {
+    // Create LDAP client
+    const client = ldap.createClient({
+      url: LDAP_URL,
+      tlsOptions: LDAP_USE_TLS ? { rejectUnauthorized: false } : undefined,
+      connectTimeout: 10000,
+      timeout: 10000,
+    });
+
+    client.on('error', (err) => {
+      logger.error({ err }, 'LDAP client error');
+      reject(new Error('LDAP connection failed'));
+    });
+
+    // Build the user DN for binding
+    // Support multiple formats: UPN (user@domain.com), DOMAIN\user, or plain username
+    let bindDn: string;
+    if (username.includes('@')) {
+      // User Principal Name format (user@domain.com)
+      bindDn = username;
+    } else if (username.includes('\\')) {
+      // DOMAIN\username format
+      bindDn = username;
+    } else {
+      // Plain username - use domain\user format
+      bindDn = `${AD_DOMAIN}\\${username}`;
+    }
+
+    logger.debug({ bindDn, ldapUrl: LDAP_URL }, 'Attempting LDAP bind');
+
+    // Attempt to bind (authenticate) with user credentials
+    client.bind(bindDn, password, (bindErr) => {
+      if (bindErr) {
+        client.unbind();
+        logger.warn({ bindDn, error: bindErr.message }, 'LDAP bind failed');
+        reject(new Error('Invalid username or password'));
+        return;
+      }
+
+      logger.info({ bindDn }, 'LDAP bind successful');
+
+      // Extract clean username for search
+      let cleanUsername: string;
+      if (username.includes('\\')) {
+        cleanUsername = username.split('\\').pop() || username;
+      } else if (username.includes('@')) {
+        cleanUsername = username.split('@')[0] || username;
+      } else {
+        cleanUsername = username;
+      }
+
+      // Now search for user details and groups
+      const searchFilter = LDAP_USER_SEARCH_FILTER.replace('{{username}}', cleanUsername);
+      
+      const searchOptions: ldap.SearchOptions = {
+        scope: 'sub',
+        filter: searchFilter,
+        attributes: ['dn', 'sAMAccountName', 'mail', 'displayName', 'memberOf', 'userPrincipalName'],
+      };
+
+      client.search(LDAP_BASE_DN, searchOptions, (searchErr, searchRes) => {
+        if (searchErr) {
+          client.unbind();
+          logger.error({ searchErr }, 'LDAP search failed');
+          reject(new Error('Failed to retrieve user information'));
+          return;
+        }
+
+        let userEntry: LdapUser | null = null;
+
+        searchRes.on('searchEntry', (entry) => {
+          const attrs = entry.pojo?.attributes || [];
+          const getAttribute = (name: string): string => {
+            const attr = attrs.find((a: any) => a.type?.toLowerCase() === name.toLowerCase());
+            return attr?.values?.[0] || '';
+          };
+          const getAttributeArray = (name: string): string[] => {
+            const attr = attrs.find((a: any) => a.type?.toLowerCase() === name.toLowerCase());
+            return attr?.values || [];
+          };
+
+          // Extract group names from memberOf DNs
+          const memberOf = getAttributeArray('memberOf');
+          const groups: string[] = memberOf.map((dn: string) => {
+            // Extract CN from DN like "CN=GroupName,OU=Groups,DC=example,DC=com"
+            const match = dn.match(/^CN=([^,]+)/i);
+            return match && match[1] ? match[1].toLowerCase() : dn.toLowerCase();
+          });
+
+          const foundUsername = getAttribute('sAMAccountName') || cleanUsername;
+          const foundEmail = getAttribute('mail') || getAttribute('userPrincipalName') || `${cleanUsername}@${AD_DOMAIN.toLowerCase()}.com`;
+          const foundDisplayName = getAttribute('displayName') || cleanUsername;
+          
+          userEntry = {
+            dn: entry.pojo?.objectName || bindDn,
+            username: foundUsername,
+            email: foundEmail,
+            displayName: foundDisplayName,
+            groups,
+          };
+
+          logger.debug({ username: foundUsername, groupCount: groups.length }, 'User found');
+        });
+
+        searchRes.on('error', (err) => {
+          client.unbind();
+          logger.error({ err }, 'LDAP search error');
+          reject(new Error('Failed to retrieve user information'));
+        });
+
+        searchRes.on('end', () => {
+          client.unbind();
+          
+          if (!userEntry) {
+            // User authenticated but couldn't find their entry
+            // This can happen with certain AD configurations
+            // Return basic info based on username
+            logger.warn({ username: cleanUsername }, 'User authenticated but entry not found, using basic info');
+            resolve({
+              dn: bindDn,
+              username: cleanUsername,
+              email: `${cleanUsername}@${AD_DOMAIN.toLowerCase()}.com`,
+              displayName: cleanUsername,
+              groups: [],
+            });
+            return;
+          }
+
+          resolve(userEntry);
+        });
+      });
+    });
+  });
 }
 
 /**
@@ -59,17 +185,17 @@ function derivePermissionsFromGroups(adGroups: string[]): {
   role: 'ADMIN' | 'MEMBER' | 'VIEWER';
   permissions: string[];
 } {
-  const isAdmin = adGroups.some(group =>
+  const normalizedGroups = adGroups.map(g => g.toLowerCase());
+  
+  const isAdmin = normalizedGroups.some(group =>
     AD_ADMIN_GROUPS.some(adminGroup =>
-      group.toLowerCase() === adminGroup.toLowerCase() ||
-      group.toLowerCase().includes(adminGroup.toLowerCase())
+      group === adminGroup || group.includes(adminGroup)
     )
   );
 
-  const isUser = adGroups.some(group =>
+  const isUser = normalizedGroups.some(group =>
     AD_USER_GROUPS.some(userGroup =>
-      group.toLowerCase() === userGroup.toLowerCase() ||
-      group.toLowerCase().includes(userGroup.toLowerCase())
+      group === userGroup || group.includes(userGroup)
     )
   );
 
@@ -134,6 +260,10 @@ async function createSessionToken(user: any, adGroups: string[], permissions: st
     .sign(secret);
 }
 
+// ============================================================================
+// ROUTES
+// ============================================================================
+
 export async function authRoutes(fastify: FastifyInstance) {
   /**
    * GET /api/auth/config
@@ -142,148 +272,67 @@ export async function authRoutes(fastify: FastifyInstance) {
   fastify.get('/config', async (_request: FastifyRequest, _reply: FastifyReply) => {
     return {
       mode: AUTH_MODE,
-      loginUrl: AUTH_MODE === 'development' ? null : '/api/auth/login',
-      provider: AUTH_MODE === 'oidc' ? 'azure-ad' : 'development',
-      configured: AUTH_MODE === 'oidc' ? !!(AZURE_AD_TENANT_ID && AZURE_AD_CLIENT_ID) : true,
+      provider: AUTH_MODE === 'ldap' ? 'active-directory' : 'development',
+      configured: AUTH_MODE === 'ldap' ? !!LDAP_URL : true,
+      domain: AD_DOMAIN,
     };
   });
 
   /**
-   * GET /api/auth/login
-   * Initiates Azure AD OAuth2 login flow
-   * Redirects user to Microsoft login page
+   * POST /api/auth/login
+   * Direct login with username and password
+   * Authenticates against Active Directory via LDAP
    */
-  fastify.get('/login', async (request: FastifyRequest, reply: FastifyReply) => {
-    if (AUTH_MODE === 'development') {
+  fastify.post('/login', async (request: FastifyRequest, reply: FastifyReply) => {
+    const { username, password } = request.body as { username?: string; password?: string };
+
+    if (!username || !password) {
       return reply.status(400).send({
-        error: 'OAuth login not available in development mode',
-        message: 'Use token-based authentication in development',
+        error: 'Missing credentials',
+        message: 'Username and password are required',
       });
     }
 
-    if (!AZURE_AD_TENANT_ID || !AZURE_AD_CLIENT_ID) {
-      return reply.status(500).send({
-        error: 'Azure AD not configured',
-        message: 'Set AZURE_AD_TENANT_ID and AZURE_AD_CLIENT_ID environment variables',
+    // Development mode - accept test credentials
+    if (AUTH_MODE === 'development') {
+      return handleDevLogin(username, password);
+    }
+
+    // LDAP mode - authenticate against Active Directory
+    if (AUTH_MODE !== 'ldap') {
+      return reply.status(400).send({
+        error: 'Invalid auth mode',
+        message: 'Authentication mode is not configured for direct login',
       });
     }
-
-    const endpoints = getAzureAdEndpoints();
-    
-    // Generate state for CSRF protection
-    const state = jose.base64url.encode(crypto.getRandomValues(new Uint8Array(32)));
-    
-    // Store state in cookie for validation
-    reply.setCookie('oauth_state', state, {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
-      sameSite: 'lax',
-      maxAge: 600, // 10 minutes
-      path: '/',
-    });
-
-    // Build authorization URL
-    const params = new URLSearchParams({
-      client_id: AZURE_AD_CLIENT_ID,
-      response_type: 'code',
-      redirect_uri: REDIRECT_URI,
-      response_mode: 'query',
-      scope: 'openid profile email User.Read',
-      state,
-      prompt: 'select_account', // Allow user to choose account
-    });
-
-    const authUrl = `${endpoints.authorize}?${params.toString()}`;
-    
-    logger.info({ authUrl: authUrl.split('?')[0] }, 'Redirecting to Azure AD login');
-    
-    return reply.redirect(authUrl);
-  });
-
-  /**
-   * GET /api/auth/callback
-   * OAuth2 callback handler - exchanges code for tokens
-   */
-  fastify.get('/callback', async (request: FastifyRequest, reply: FastifyReply) => {
-    const { code, state, error, error_description } = request.query as {
-      code?: string;
-      state?: string;
-      error?: string;
-      error_description?: string;
-    };
-
-    // Handle OAuth errors
-    if (error) {
-      logger.error({ error, error_description }, 'OAuth error from Azure AD');
-      return reply.redirect(`${FRONTEND_URL}/login?error=${encodeURIComponent(error_description || error)}`);
-    }
-
-    if (!code) {
-      return reply.redirect(`${FRONTEND_URL}/login?error=no_code`);
-    }
-
-    // Validate state
-    const storedState = request.cookies?.oauth_state;
-    if (!storedState || storedState !== state) {
-      logger.warn('OAuth state mismatch');
-      return reply.redirect(`${FRONTEND_URL}/login?error=state_mismatch`);
-    }
-
-    // Clear state cookie
-    reply.clearCookie('oauth_state', { path: '/' });
 
     try {
-      const endpoints = getAzureAdEndpoints();
+      // Authenticate against AD
+      const ldapUser = await authenticateWithLdap(username, password);
+      
+      logger.info({ 
+        username: ldapUser.username, 
+        email: ldapUser.email,
+        groupCount: ldapUser.groups.length,
+      }, 'User authenticated via LDAP');
 
-      // Exchange code for tokens
-      const tokenResponse = await fetch(endpoints.token, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: new URLSearchParams({
-          client_id: AZURE_AD_CLIENT_ID!,
-          client_secret: AZURE_AD_CLIENT_SECRET!,
-          code,
-          redirect_uri: REDIRECT_URI,
-          grant_type: 'authorization_code',
-        }),
-      });
-
-      if (!tokenResponse.ok) {
-        const errorData = await tokenResponse.json();
-        logger.error({ error: errorData }, 'Token exchange failed');
-        return reply.redirect(`${FRONTEND_URL}/login?error=token_exchange_failed`);
-      }
-
-      const tokens = await tokenResponse.json() as { id_token: string; access_token: string };
-      const { id_token, access_token } = tokens;
-
-      // Verify and decode the ID token
-      const JWKS = jose.createRemoteJWKSet(new URL(endpoints.jwks));
-      const { payload: claims } = await jose.jwtVerify(id_token, JWKS, {
-        issuer: `https://login.microsoftonline.com/${AZURE_AD_TENANT_ID}/v2.0`,
-        audience: AZURE_AD_CLIENT_ID!,
-      });
+      // Derive permissions from AD groups
+      const { isAdmin, role, permissions } = derivePermissionsFromGroups(ldapUser.groups);
 
       logger.info({ 
-        email: claims.email, 
-        name: claims.name,
-        sub: claims.sub,
-      }, 'User authenticated via Azure AD');
+        username: ldapUser.username, 
+        isAdmin, 
+        role,
+        groups: ldapUser.groups.slice(0, 5), // Log first 5 groups
+      }, 'User permissions derived from AD groups');
 
-      // Extract AD groups from token
-      const adGroups = extractAdGroups(claims);
-      const { isAdmin, role, permissions } = derivePermissionsFromGroups(adGroups);
-
-      logger.info({ adGroups, isAdmin, role }, 'User AD group permissions');
-
-      // Find or create user
+      // Find or create user in database (JIT provisioning)
       let user = await prisma.user.findUnique({
-        where: { externalId: claims.sub },
+        where: { externalId: `ldap|${ldapUser.username}` },
         include: { org: true },
       });
 
       if (!user) {
-        // JIT Provisioning - create user on first login
         // Get or create default organization
         let org = await prisma.organization.findUnique({
           where: { slug: DEFAULT_ORG_SLUG },
@@ -301,9 +350,9 @@ export async function authRoutes(fastify: FastifyInstance) {
 
         user = await prisma.user.create({
           data: {
-            externalId: claims.sub as string,
-            email: (claims.email as string) || (claims.preferred_username as string) || `${claims.sub}@unknown`,
-            name: claims.name as string || undefined,
+            externalId: `ldap|${ldapUser.username}`,
+            email: ldapUser.email,
+            name: ldapUser.displayName,
             orgId: org.id,
             role,
             status: 'ACTIVE',
@@ -311,29 +360,42 @@ export async function authRoutes(fastify: FastifyInstance) {
           include: { org: true },
         });
 
-        logger.info({ userId: user.id, email: user.email, adGroups }, 'Created new user from Azure AD');
+        logger.info({ userId: user.id, email: user.email }, 'Created new user from LDAP');
       } else {
         // Update user's role based on current AD groups
         await prisma.user.update({
           where: { id: user.id },
           data: {
             role,
-            name: claims.name as string || user.name,
+            name: ldapUser.displayName,
             lastLoginAt: new Date(),
           },
         });
       }
 
       // Create session token
-      const sessionToken = await createSessionToken(user, adGroups, permissions, isAdmin);
+      const token = await createSessionToken(user, ldapUser.groups, permissions, isAdmin);
 
-      // Redirect to frontend with token
-      // In production, you might want to use HttpOnly cookies instead
-      return reply.redirect(`${FRONTEND_URL}/auth/callback?token=${sessionToken}`);
+      return {
+        success: true,
+        token,
+        user: {
+          id: user.id,
+          email: user.email,
+          name: user.name,
+          role: user.role,
+          isAdmin,
+          groups: ldapUser.groups,
+        },
+      };
 
     } catch (err) {
-      logger.error({ error: err }, 'OAuth callback error');
-      return reply.redirect(`${FRONTEND_URL}/login?error=authentication_failed`);
+      logger.warn({ err, username }, 'Login failed');
+      
+      return reply.status(401).send({
+        error: 'Authentication failed',
+        message: err instanceof Error ? err.message : 'Invalid username or password',
+      });
     }
   });
 
@@ -363,13 +425,7 @@ export async function authRoutes(fastify: FastifyInstance) {
    * POST /api/auth/logout
    * Clears session (client should clear local token)
    */
-  fastify.post('/logout', async (_request: FastifyRequest, reply: FastifyReply) => {
-    // For Azure AD, you might want to redirect to Azure AD logout
-    if (AUTH_MODE === 'oidc' && AZURE_AD_TENANT_ID) {
-      const logoutUrl = `https://login.microsoftonline.com/${AZURE_AD_TENANT_ID}/oauth2/v2.0/logout?post_logout_redirect_uri=${encodeURIComponent(FRONTEND_URL)}`;
-      return { logoutUrl };
-    }
-    
+  fastify.post('/logout', async (_request: FastifyRequest, _reply: FastifyReply) => {
     return { success: true };
   });
 
@@ -384,48 +440,69 @@ export async function authRoutes(fastify: FastifyInstance) {
 
     const { userId, role } = request.body as { userId?: string; role?: string };
     
-    // Find or create a test user
-    const externalId = userId || 'auth0|dev-user-001';
-    
-    let user = await prisma.user.findUnique({
-      where: { externalId },
-      include: { org: true },
+    return handleDevLogin(userId || 'dev-admin', 'devpass', role as any);
+  });
+}
+
+/**
+ * Handle development mode login
+ */
+async function handleDevLogin(
+  username: string, 
+  _password: string,
+  role?: 'ADMIN' | 'MEMBER'
+) {
+  const externalId = `ldap|${username}`;
+  const effectiveRole = role || (username.toLowerCase().includes('admin') ? 'ADMIN' : 'MEMBER');
+  
+  let user = await prisma.user.findUnique({
+    where: { externalId },
+    include: { org: true },
+  });
+
+  if (!user) {
+    let org = await prisma.organization.findUnique({
+      where: { slug: 'default' },
     });
 
-    if (!user) {
-      let org = await prisma.organization.findUnique({
-        where: { slug: 'default' },
-      });
-
-      if (!org) {
-        org = await prisma.organization.create({
-          data: {
-            name: 'default',
-            displayName: 'Default Organization',
-            slug: 'default',
-          },
-        });
-      }
-
-      user = await prisma.user.create({
+    if (!org) {
+      org = await prisma.organization.create({
         data: {
-          externalId,
-          email: 'dev@example.com',
-          name: 'Development User',
-          orgId: org.id,
-          role: (role as any) || 'ADMIN',
-          status: 'ACTIVE',
+          name: 'default',
+          displayName: 'Default Organization',
+          slug: 'default',
         },
-        include: { org: true },
       });
     }
 
-    // Determine groups based on role
-    const adGroups = role === 'MEMBER' ? ['consec-example-users'] : ['consec-example-admin'];
-    const { isAdmin, permissions } = derivePermissionsFromGroups(adGroups);
+    user = await prisma.user.create({
+      data: {
+        externalId,
+        email: `${username}@example.com`,
+        name: username,
+        orgId: org.id,
+        role: effectiveRole,
+        status: 'ACTIVE',
+      },
+      include: { org: true },
+    });
+  }
 
-    const token = await createSessionToken(user, adGroups, permissions, isAdmin);
+  // Determine groups based on role
+  const adGroups = effectiveRole === 'ADMIN' ? ['consec-example-admin'] : ['consec-example-users'];
+  const { isAdmin, permissions } = derivePermissionsFromGroups(adGroups);
 
-    return { token, user: { id: user.id, email: user.email, role: user.role } };
-  });
+  const token = await createSessionToken(user, adGroups, permissions, isAdmin);
+
+  return { 
+    success: true,
+    token, 
+    user: { 
+      id: user.id, 
+      email: user.email, 
+      name: user.name,
+      role: user.role,
+      isAdmin,
+    } 
+  };
 }
