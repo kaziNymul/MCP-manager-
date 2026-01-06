@@ -1,0 +1,96 @@
+flowchart TB
+    subgraph Registration["PHASE 1: SERVER REGISTRATION"]
+        A1["Admin registers MCP Server via UI"]
+        A2["Control Plane API creates record"]
+        A3[("PostgreSQL: Status PENDING")]
+        A4["Create Scan Job"]
+        
+        A1 --> A2 --> A3 --> A4
+    end
+
+    subgraph Scanning["SECURITY SCANNING"]
+        B1["Scanner Worker polls jobs"]
+        B2["Connect to MCP Server"]
+        B3["Call tools/list"]
+        B4["Analyze tool names"]
+        B5["Check input schemas"]
+        B6["Detect vulnerabilities"]
+        B7["Compute Risk Score 0-100"]
+        B8{"Risk <= 30?"}
+        B9["AUTO-APPROVE"]
+        B10["PENDING REVIEW"]
+        
+        B1 --> B2 --> B3 --> B4 --> B5 --> B6 --> B7 --> B8
+        B8 -->|Yes| B9
+        B8 -->|No| B10
+    end
+
+    subgraph Discovery["PHASE 2: DISCOVERY"]
+        C1["GitHub Copilot queries Registry"]
+        C2["Registry returns GATEWAY URLs"]
+        C3["Not real server endpoints!"]
+        
+        C1 --> C2 --> C3
+    end
+
+    subgraph Gateway["PHASE 3: RUNTIME GATEWAY"]
+        D1["MCP Client sends request"]
+        D2["Gateway receives request"]
+        D3["JWT Authentication"]
+        D4["Anomaly Detection"]
+        D5["Threat Detection"]
+        D6["Dangerous Tool Check"]
+        D7["Policy Evaluation"]
+        D8["Schema Validation"]
+        D9{"All Passed?"}
+        D10["BLOCK - 403 Forbidden"]
+        D11["Proxy to Backend Server"]
+        D12["Scan Response for leaks"]
+        D13["Log to Audit Trail"]
+        D14["Return Response"]
+        
+        D1 --> D2 --> D3 --> D4 --> D5 --> D6 --> D7 --> D8 --> D9
+        D9 -->|No| D10 --> D13
+        D9 -->|Yes| D11 --> D12 --> D13 --> D14
+    end
+
+    subgraph Threats["THREATS BLOCKED"]
+        T1["Prompt Injection"]
+        T2["Command Injection"]
+        T3["Path Traversal"]
+        T4["SSRF Attacks"]
+        T5["SQL Injection"]
+        T6["Data Exfiltration"]
+    end
+
+    subgraph Policies["POLICY TYPES"]
+        P1["Tool Denylist"]
+        P2["Tool Allowlist"]
+        P3["Capability Gates"]
+        P4["Rate Limits"]
+    end
+
+    subgraph Audit["AUDIT LOGGING"]
+        AU1["All tool calls logged"]
+        AU2["Blocked requests logged"]
+        AU3["Full request/response capture"]
+    end
+
+    A4 --> B1
+    B9 --> C1
+    B10 -->|After approval| C1
+    C3 --> D1
+    D5 -.-> Threats
+    D7 -.-> Policies
+    D13 --> Audit
+
+    style Registration fill:#dbeafe,stroke:#3b82f6,stroke-width:2px
+    style Scanning fill:#dcfce7,stroke:#22c55e,stroke-width:2px
+    style Discovery fill:#fef3c7,stroke:#f59e0b,stroke-width:2px
+    style Gateway fill:#fee2e2,stroke:#ef4444,stroke-width:2px
+    style Threats fill:#fecaca,stroke:#dc2626,stroke-width:2px
+    style Policies fill:#e0e7ff,stroke:#6366f1,stroke-width:2px
+    style Audit fill:#f0fdf4,stroke:#16a34a,stroke-width:2px
+    style B9 fill:#22c55e,stroke:#15803d,color:#fff
+    style D10 fill:#ef4444,stroke:#b91c1c,color:#fff
+    style B10 fill:#f59e0b,stroke:#d97706
